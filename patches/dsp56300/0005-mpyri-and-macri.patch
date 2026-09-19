@@ -1,0 +1,106 @@
+alu: implement MPYRI and MACRI
+
+They are MPYI and MACI with the rounding post-shift; the encodings differ only
+in the low two bits, and alu_mpy already takes the round flag. Both were
+decoded as their non-rounding twins.
+
+--- a/source/dsp56kEmu/dsp_ops_alu.inl
++++ b/source/dsp56kEmu/dsp_ops_alu.inl
+@@ -1065,7 +1065,16 @@ namespace dsp56k
+ 	}
+ 	inline void DSP::op_Macri_xxxx(const TWord op)
+ 	{
+-		errNotImplemented("MACRI");		
++		const bool	ab		= getFieldValue<Macri_xxxx,Field_d>(op);
++		const bool	negate	= getFieldValue<Macri_xxxx,Field_k>(op);
++		const TWord qq		= getFieldValue<Macri_xxxx,Field_qq>(op);
++
++		const TReg24 s		= TReg24(immediateDataExt<Macri_xxxx>());
++
++		const TReg24 reg	= decode_qq_read(qq);
++
++		alu_mpy( ab, reg, s, negate, true );
++		alu_rnd( ab );
+ 	}
+ 	inline void DSP::op_Max(const TWord op)
+ 	{
+@@ -1160,7 +1169,16 @@ namespace dsp56k
+ 	}
+ 	inline void DSP::op_Mpyri(const TWord op)
+ 	{
+-		errNotImplemented("MPYRI");
++		const bool	ab		= getFieldValue<Mpyri,Field_d>(op);
++		const bool	negate	= getFieldValue<Mpyri,Field_k>(op);
++		const TWord qq		= getFieldValue<Mpyri,Field_qq>(op);
++
++		const TReg24 s		= TReg24(immediateDataExt<Mpyri>());
++
++		const TReg24 reg	= decode_qq_read(qq);
++
++		alu_mpy( ab, reg, s, negate, false );
++		alu_rnd( ab );
+ 	}
+ 	inline void DSP::op_Neg(const TWord op)
+ 	{
+--- a/source/dsp56kEmu/jitops.h
++++ b/source/dsp56kEmu/jitops.h
+@@ -199,7 +199,7 @@ namespace dsp56k
+ 		template<Instruction Inst, bool Accumulate, bool Round> void op_Mac_S(TWord op);
+ 		void op_Maci_xxxx(TWord op);
+ 		void op_Macr_S1S2(TWord op)		{ alu_multiply(op); }
+-		void op_Macri_xxxx(TWord op)	{ errNotImplemented(op); }
++		void op_Macri_xxxx(TWord op);
+ 		void op_Max(TWord op);
+ 		void op_Maxm(TWord op);
+ 		void op_Merge(TWord op)			{ errNotImplemented(op); }
+@@ -240,7 +240,7 @@ namespace dsp56k
+ 		template<Instruction Inst, bool Accumulate> void op_Mpy_su(TWord op);
+ 		void op_Mpyi(TWord op);
+ 		void op_Mpyr_S1S2D(TWord op)			{ alu_multiply(op); }
+-		void op_Mpyri(TWord op)					{ errNotImplemented(op); }
++		void op_Mpyri(TWord op);
+ 		void op_Neg(TWord op);
+ 		void op_Nop(TWord op);
+ 		void op_Norm(TWord op)					{ errNotImplemented(op); }
+--- a/source/dsp56kEmu/jitops_alu.cpp
++++ b/source/dsp56kEmu/jitops_alu.cpp
+@@ -1014,6 +1014,39 @@ namespace dsp56k
+ 		alu_mpy(ab, reg, s, negate, true, false, false, false);
+ 	}
+ 
++	// MPYRI/MACRI are MPYI/MACI with the rounding post-shift; the encodings
++	// differ only in the low two bits (...qqdk01 vs ...qqdk00, ...qqdk11 vs
++	// ...qqdk10) and alu_mpy already takes the round flag.
++	void JitOps::op_Mpyri(TWord op)
++	{
++		const bool	ab = getFieldValue<Mpyri, Field_d>(op);
++		const bool	negate = getFieldValue<Mpyri, Field_k>(op);
++		const TWord qq = getFieldValue<Mpyri, Field_qq>(op);
++
++		DspValue s(m_block);
++		getOpWordB(s);
++
++		DspValue reg(m_block);
++		decode_qq_read(reg, qq, true);
++
++		alu_mpy(ab, reg, s, negate, false, false, false, true);
++	}
++
++	void JitOps::op_Macri_xxxx(TWord op)
++	{
++		const bool	ab = getFieldValue<Macri_xxxx, Field_d>(op);
++		const bool	negate = getFieldValue<Macri_xxxx, Field_k>(op);
++		const TWord qq = getFieldValue<Macri_xxxx, Field_qq>(op);
++
++		DspValue s(m_block);
++		getOpWordB(s);
++
++		DspValue reg(m_block);
++		decode_qq_read(reg, qq, true);
++
++		alu_mpy(ab, reg, s, negate, true, false, false, true);
++	}
++
+ 	void JitOps::op_Neg(TWord op)
+ 	{
+ 		const auto D = getFieldValue<Neg, Field_d>(op);

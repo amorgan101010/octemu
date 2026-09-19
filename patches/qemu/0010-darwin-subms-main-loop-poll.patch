@@ -1,0 +1,29 @@
+util/qemu-timer: do not round sub-millisecond main-loop waits up on Darwin
+
+Darwin has no ppoll, so qemu_poll_ns falls back to g_poll, whose timeout is in
+milliseconds: every sub-millisecond deadline is rounded UP to a full 1 ms, and a
+device timer armed 5 us out can fire 200x late. Poll with a zero timeout for
+those instead. The spin is bounded by the deadline itself, which is by
+definition shorter than one poll tick.
+
+diff --git a/util/qemu-timer.c b/util/qemu-timer.c
+index d93a020064..d9c23dbac5 100644
+--- a/util/qemu-timer.c
++++ b/util/qemu-timer.c
+@@ -343,6 +343,16 @@ int qemu_poll_ns(GPollFD *fds, guint nfds, int64_t timeout)
+         return ppoll((struct pollfd *)fds, nfds, &ts, NULL);
+     }
+ #else
++    /*
++     * No ppoll (Darwin): g_poll's timeout is milliseconds, so every
++     * sub-millisecond deadline is rounded UP to a full 1 ms and a device
++     * timer armed 5 us out fires up to 200x late. Spin the main loop for
++     * those instead — the wait is by definition shorter than one poll tick,
++     * so the CPU cost is bounded by the deadline itself.
++     */
++    if (timeout > 0 && timeout < SCALE_MS) {
++        return g_poll(fds, nfds, 0);
++    }
+     return g_poll(fds, nfds, qemu_timeout_ns_to_ms(timeout));
+ #endif
+ }

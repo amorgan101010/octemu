@@ -1,0 +1,395 @@
+# SPDX-License-Identifier: MIT
+# EMAC — the ColdFire Enhanced Multiply-Accumulate unit, as specified.
+#
+# This file is the ACCEPTANCE SPECIFICATION for emulator milestone M1
+# Everything here is read from the vendor's own
+# reference manual, NOT from observing an emulator — which matters, because the
+# emulator we are fixing gets several of these wrong, and measuring it would
+# only re-derive its bugs.
+#
+# Source: MCF54455RM.pdf Chapter 5, "Enhanced Multiply-Accumulate Unit (EMAC)",
+# pages 5-1..5-20 (PDF pages 126-145). Fetch it from NXP; the
+# SHA256 is pinned in downloads/refs/SHA256SUMS.txt.
+
+schema = 1
+
+# ======================================================= accumulator structure ==
+
+[claim.emac_acc_count]
+value = 4
+confidence = "verified-doc"
+what = "accumulators ACC0..ACC3"
+provenance = "MCF54455RM Table 5-1: BDM 0x806, 0x809, 0x80A, 0x80B"
+
+[claim.emac_acc_bits_total]
+value = 48
+confidence = "verified-doc"
+what = "full accumulator width — NOT 32 and NOT 40"
+provenance = """MCF54455RM §5.2.4: 'Each pair of 8-bit accumulator extension
+fields are concatenated with the corresponding 32-bit accumulator register to
+form the 48-bit accumulator.'"""
+
+[claim.emac_acc_bits_visible]
+value = 32
+confidence = "verified-doc"
+what = "the ACCx register proper — the middle 32 bits of the 48"
+provenance = "MCF54455RM Table 5-1"
+
+[claim.emac_acc_bits_ext_upper]
+value = 8
+confidence = "verified-doc"
+what = "upper extension byte per accumulator"
+provenance = "MCF54455RM Table 5-6"
+
+[claim.emac_acc_bits_ext_lower]
+value = 8
+confidence = "verified-doc"
+what = "lower extension byte per accumulator — the guard bits below the result"
+provenance = """MCF54455RM §5.2.1 R/T description: 'when a store accumulator
+instruction is executed (move.l ACCx,Rx), the 8 lsbs of the 48-bit accumulator
+logic are truncated.'"""
+
+[[check.arithmetic]]
+name = "the 48-bit accumulator is upper ext + register + lower ext"
+expr = "emac_acc_bits_total == emac_acc_bits_ext_upper + emac_acc_bits_visible + emac_acc_bits_ext_lower"
+
+# This layout resolves a question flagged unverified during emulator scoping.
+[claim.emac_accext01_acc0u_shift]
+value = 24
+confidence = "verified-doc"
+what = "bit position of ACC0's UPPER extension byte within ACCext01 (bits 31-24)"
+provenance = "MCF54455RM Table 5-6"
+
+[claim.emac_accext01_acc0l_shift]
+value = 16
+confidence = "verified-doc"
+what = "bit position of ACC0's LOWER extension byte within ACCext01 (bits 23-16)"
+provenance = "MCF54455RM Table 5-6"
+
+[claim.emac_accext01_acc1u_shift]
+value = 8
+confidence = "verified-doc"
+what = "bit position of ACC1's UPPER extension byte within ACCext01 (bits 15-8)"
+provenance = "MCF54455RM Table 5-6"
+
+[claim.emac_accext01_acc1l_shift]
+value = 0
+confidence = "verified-doc"
+what = "bit position of ACC1's LOWER extension byte within ACCext01 (bits 7-0)"
+provenance = "MCF54455RM Table 5-6"
+
+[[check.arithmetic]]
+name = "ACCext01 packs ACC0 above ACC1, upper byte above lower, no gaps"
+expr = "emac_accext01_acc0u_shift == 24 and emac_accext01_acc0l_shift == 16 and emac_accext01_acc1u_shift == 8 and emac_accext01_acc1l_shift == 0"
+
+# ================================================================ MACSR layout ==
+
+[claim.emac_macsr_bit_omc]
+value = 7
+confidence = "verified-doc"
+what = "MACSR[OMC] — overflow/saturation mode control"
+provenance = "MCF54455RM Figure 5-2, Table 5-2"
+
+[claim.emac_macsr_bit_su]
+value = 6
+confidence = "verified-doc"
+what = "MACSR[S/U] — signed/unsigned in INTEGER mode; store-rounding width in FRACTIONAL mode"
+provenance = "MCF54455RM Figure 5-2, Table 5-2, Table 5-3"
+
+[claim.emac_macsr_bit_fi]
+value = 5
+confidence = "verified-doc"
+what = "MACSR[F/I] — fractional (1) or integer (0) operand interpretation"
+provenance = "MCF54455RM Figure 5-2"
+
+[claim.emac_macsr_bit_rt]
+value = 4
+confidence = "verified-doc"
+what = "MACSR[R/T] — round (1) or truncate (0)"
+provenance = "MCF54455RM Figure 5-2"
+
+[claim.emac_macsr_bit_n]
+value = 3
+confidence = "verified-doc"
+what = "MACSR[N] — negative. Set if the msb of the result is set."
+provenance = "MCF54455RM Table 5-2"
+
+[claim.emac_macsr_bit_z]
+value = 2
+confidence = "verified-doc"
+what = "MACSR[Z] — zero"
+provenance = "MCF54455RM Table 5-2"
+
+[claim.emac_macsr_bit_v]
+value = 1
+confidence = "verified-doc"
+what = "MACSR[V] — overflow: product overflow, or accumulation overflowing the 48-bit structure"
+provenance = "MCF54455RM Table 5-2"
+
+[claim.emac_macsr_bit_ev]
+value = 0
+confidence = "verified-doc"
+what = "MACSR[EV] — extension overflow: overflowed the 32 lsbs (integer) or 40 lsbs (fractional), but the 48-bit result is still correct"
+provenance = "MCF54455RM Table 5-2"
+
+[claim.emac_macsr_pav_shift]
+value = 8
+confidence = "verified-doc"
+what = "MACSR[PAVn] base — per-accumulator overflow flags, bit 8 = ACC0 .. bit 11 = ACC3. Sticky until V is cleared by a move.l to MACSR or the accumulator is loaded directly."
+provenance = "MCF54455RM Table 5-2"
+
+[[check.arithmetic]]
+name = "the MACSR mode field is four contiguous bits above the four flag bits"
+expr = "emac_macsr_bit_omc == emac_macsr_bit_su + 1 and emac_macsr_bit_su == emac_macsr_bit_fi + 1 and emac_macsr_bit_fi == emac_macsr_bit_rt + 1 and emac_macsr_bit_rt == emac_macsr_bit_n + 1"
+
+[[check.arithmetic]]
+name = "the flag bits are the low four, in order N Z V EV"
+expr = "emac_macsr_bit_n == 3 and emac_macsr_bit_z == 2 and emac_macsr_bit_v == 1 and emac_macsr_bit_ev == 0"
+
+# ============================================ THE RULE THAT IS EASY TO GET WRONG ==
+
+[claim.emac_fractional_is_always_signed]
+value = true
+confidence = "verified-doc"
+what = """☠ IN FRACTIONAL MODE OPERANDS ARE ALWAYS SIGNED, whatever S/U says.
+S/U is NOT a signedness control when F/I = 1 — it selects the rounding width used
+when STORING an accumulator to a general-purpose register (32-bit vs 16-bit).
+Only in integer mode does S/U choose signed vs unsigned."""
+provenance = """MCF54455RM Table 5-3 enumerates all eight combinations, and every
+row with F/I = 1 reads 'Signed, fractional' regardless of S/U. Corroborated by
+§5.2.1: 'F/I ... 0 Integers can be represented in signed or unsigned notation,
+depending on the value of S/U' -- the dependency is stated only for integers, and
+by the S/U description itself, which says 'In fractional mode: S/U controls
+rounding while storing an accumulator to a general-purpose register.'"""
+
+[claim.emac_sat_signed_max]
+value = 0x7FFFFFFF
+confidence = "verified-doc"
+what = "signed saturation ceiling when OMC is enabled"
+provenance = "MCF54455RM Table 5-2, S/U description"
+
+[claim.emac_sat_signed_min]
+value = 0x80000000
+confidence = "verified-doc"
+what = "signed saturation floor when OMC is enabled"
+provenance = "MCF54455RM Table 5-2, S/U description"
+
+[claim.emac_sat_is_sticky]
+value = true
+confidence = "verified-doc"
+what = """☠ Saturation FREEZES the accumulator. 'After saturation, the
+accumulator remains unaffected by any other MAC or MSAC instructions until the
+overflow bit is cleared or the accumulator is directly loaded.' An emulator that
+saturates per-operation without latching is wrong in a way that only shows up
+after the second overflow."""
+provenance = "MCF54455RM Table 5-2, OMC description"
+
+[claim.emac_round_tie_value]
+value = 0x800000
+confidence = "verified-doc"
+what = "round-to-nearest-even tie point: if the low-order 24 bits equal this, round the upper 40 bits to the nearest even (lsb = 0) value"
+provenance = "MCF54455RM Table 5-2, R/T description"
+
+[claim.emac_n_z_ignore_mul]
+value = true
+confidence = "verified-doc"
+what = "N and Z are affected ONLY by MAC, MSAC and load operations — never by MULS or MULU"
+provenance = "MCF54455RM Table 5-2, N and Z descriptions"
+
+# =========================== the six MACSR values this firmware actually writes ==
+# Decoded against Table 5-3. An earlier reading of these was wrong; see
+# ref/toolchain.toml:firmware_macsr_values.
+
+[claim.emac_macsr_firmware_00]
+value = 0x00
+confidence = "read-disasm"
+what = "signed integer, truncate, no saturation"
+provenance = "census of MACSR writes over 0x40000400-0x400b0000"
+
+[claim.emac_macsr_firmware_20]
+value = 0x20
+confidence = "read-disasm"
+what = "F/I=1 → signed fractional, truncate on MAC.L/MSAC.L, no rounding on accumulator stores"
+provenance = "census; decoded per MCF54455RM Table 5-3"
+
+[claim.emac_macsr_firmware_30]
+value = 0x30
+confidence = "read-disasm"
+what = "F/I=1 R/T=1 → signed fractional, round on MAC.L/MSAC.L, round-to-32-bits on stores"
+provenance = "census; decoded per MCF54455RM Table 5-3"
+
+[claim.emac_macsr_firmware_60]
+value = 0x60
+confidence = "read-disasm"
+what = """S/U=1 F/I=1 → signed fractional, truncate on MAC.L/MSAC.L,
+ROUND-TO-16-BITS on accumulator stores. ✗ NOT 'unsigned fractional' — fractional
+mode is always signed."""
+provenance = "census; decoded per MCF54455RM Table 5-3"
+
+[claim.emac_macsr_firmware_a0]
+value = 0xA0
+confidence = "read-disasm"
+what = "OMC=1 F/I=1 → signed fractional, truncate, SATURATING. This is the mode the ECHO FREEZE DELAY runs in."
+provenance = "census; 0x400031c4 writes #160 to MACSR"
+
+[claim.emac_macsr_firmware_b0]
+value = 0xB0
+confidence = "read-disasm"
+what = "OMC=1 F/I=1 R/T=1 → signed fractional, round, SATURATING"
+provenance = "census; decoded per MCF54455RM Table 5-3"
+
+[[check.arithmetic]]
+name = "every firmware MACSR value except 0x00 selects fractional mode"
+expr = "all((v >> emac_macsr_bit_fi) & 1 for v in (emac_macsr_firmware_20, emac_macsr_firmware_30, emac_macsr_firmware_60, emac_macsr_firmware_a0, emac_macsr_firmware_b0))"
+
+[[check.arithmetic]]
+name = "the two saturating firmware modes are exactly those with OMC set"
+expr = "((emac_macsr_firmware_a0 >> emac_macsr_bit_omc) & 1) == 1 and ((emac_macsr_firmware_b0 >> emac_macsr_bit_omc) & 1) == 1 and ((emac_macsr_firmware_30 >> emac_macsr_bit_omc) & 1) == 0"
+
+[[check.arithmetic]]
+name = "no firmware MACSR value sets a reserved bit (31-12)"
+expr = "all(v >> 12 == 0 for v in (emac_macsr_firmware_00, emac_macsr_firmware_20, emac_macsr_firmware_30, emac_macsr_firmware_60, emac_macsr_firmware_a0, emac_macsr_firmware_b0))"
+
+# ====================================== QEMU defects this specification exposes ==
+
+[claim.emac_qemu_defect_accext_packing]
+value = "ACC0 and ACC1 extension bytes are transposed in ACCext01"
+confidence = "measured-emu"
+what = """⏸ FIFTH QEMU DEFECT, identified by reading the spec rather than the
+emulator. Probing a NEGATIVE acc0 under stock QEMU returns ACCext01 =
+0x0000FF00, i.e. 0xFF sitting in bits 15-8. Per MCF54455RM Table 5-6 that field
+is ACC1U; ACC0's sign-extension byte belongs in bits 31-24 (ACC0U). The two
+accumulators are transposed: the byte offsets WITHIN each accumulator were
+always right, only the pairing was wrong.
+
+ℍ FIXED in patches/qemu/0004-emac-accext-packing.patch. The vector now returns
+0xFF000000. This claim stays as the record of what the defect was — see the
+trap below, which is why.
+
+TRAP, and it cost a rebuild on 13 Aug 2026. This fix existed for a day as an
+UNCOMMITTED edit in the local vendor/qemu tree, in no patch and in no commit. It
+was destroyed the first time that tree was reset to its base commit, and the
+loss was silent: emac_conform classifies this vector as known-unfixed when it
+fails, so the suite still printed a green summary with one fewer pass. What
+caught it was this file — emac_conformance_passing = 8 disagreed with the
+rebuilt binary's 7. A number in ref/ outlived the build that produced it, which
+is the entire argument for the substrate."""
+provenance = """ℍ CONFIRMED BY EXECUTION with this suite
+vector `accext_neg_packing`: stock QEMU returns ACCext01 = 0x0000FF00 for a
+negative acc0. Per MCF54455RM Table 5-6 the sign byte belongs in ACC0U
+(bits 31-24); it appeared in ACC1U (bits 15-8), i.e. 16 bits low. Re-derived
+from the same table and re-fixed 13 Aug 2026 after the loss described above."""
+falsifier = "`make test-emac` against a rebuilt QEMU. This claim is ABOUT the emulator, so the emulator is the right instrument — but it says nothing about the silicon, and MCF54455RM Table 5-6 is what decides who is wrong"
+
+[claim.emac_qemu_defect_fractional_su]
+value = "fractional multiply dispatches on S/U and can select unsigned"
+confidence = "verified-doc"
+what = """⏸ QEMU's translate.c selects between signed and unsigned multiply
+helpers on MACSR[S/U] without regard to F/I. Per Table 5-3 that is wrong whenever
+F/I = 1: fractional operands are always signed. Our patch made the fractional
+helper unconditionally signed, which Table 5-3 now confirms is correct — but the
+DISPATCH above it still needs gating on F/I so `macmulu` is unreachable in
+fractional mode."""
+provenance = "MCF54455RM Table 5-3 versus QEMU's dispatch (upstream, external tree)"
+
+[claim.emac_acc_write_clobbers_ext]
+value = true
+confidence = "measured-emu"
+what = """☠ `move.l Dn,ACCx` CLOBBERS that accumulator's extension bytes. Setting
+ACCext01 and then ACC0 leaves the extension zeroed; the reverse order preserves
+it. Consistent with RM Table 5-2 OMC ('or the accumulator is directly loaded'
+unlatches saturation), and it means any test that wants a preloaded 48-bit
+accumulator MUST write ACCx first and ACCextnn second."""
+provenance = "measured 12 Aug 2026: ext-then-acc gave MACSR 0xA0 (no flags); acc-then-ext gave 0xA1 (EV set)"
+falsifier = "`make test-emac`; and on hardware, preload ext-then-acc and read MACSR back. The RM does not state the ordering, so only silicon can settle whether QEMU's behaviour is a defect or the part's"
+
+[claim.emac_ev_without_v_is_correct]
+value = true
+confidence = "measured-emu"
+what = """ℍ A 40-bit overflow in fractional mode sets EV and leaves V clear, and
+the 48-bit result stays valid — exactly RM Table 5-2's EV description. Measured
+MACSR = 0xA1 (OMC|F/I|EV). QEMU gets this right; it is recorded so a future
+change cannot break it unnoticed."""
+provenance = "measured 12 Aug 2026, acc-then-ext preload plus one fractional mac.l"
+
+# ============================ the authoritative saturation spec ==============
+# RM instruction pseudocode, MAC description (PDF p.5-16). This is what M1's
+# remaining work must implement, and it contradicts BOTH QEMU's behaviour and my
+# own first guess at the fix.
+falsifier = "`make test-emac`; falsified on hardware by a MACSR that does not read 0xA1 after the same preload plus one fractional `mac.l`"
+
+[claim.emac_sat_value_positive_48]
+value = 0x00007FFFFFFF
+confidence = "verified-doc"
+what = "the 48-bit result written on positive saturation — the 32-bit limit widened, NOT the 48-bit maximum"
+provenance = "MCF54455RM ch.5 MAC pseudocode: `result[47:0] = 0x0000_7fff_ffff`"
+
+[claim.emac_sat_value_negative_48]
+value = 0xFFFF80000000
+confidence = "verified-doc"
+what = "the 48-bit result written on negative saturation"
+provenance = "MCF54455RM ch.5 MAC pseudocode: `result[47:0] = 0xffff_8000_0000`"
+
+[[check.arithmetic]]
+name = "the 48-bit saturation values carry the 32-bit signed limits"
+expr = "(emac_sat_value_positive_48 & 0xFFFFFFFF) == emac_sat_signed_max and (emac_sat_value_negative_48 & 0xFFFFFFFF) == emac_sat_signed_min"
+
+[claim.emac_sat_direction_from_product_sign]
+value = true
+confidence = "verified-doc"
+what = """☠ Saturation direction is decided by the sign of the PRODUCT
+(`product[63]`), not by the sign of the wrapped accumulator — and it is INVERTED
+for MSAC, because subtracting a negative product overflows upward. QEMU derives
+the direction from the post-truncation result instead."""
+provenance = "MCF54455RM ch.5 MAC pseudocode, both the MSAC and the MAC branches"
+
+[claim.emac_sat_direction_suspect]
+value = "QEMU saturates upward overflow to the NEGATIVE limit"
+confidence = "inferred"
+what = """𝕚 On a genuine 48-bit overflow produced by accumulating 512 POSITIVE
+fractional products, QEMU sets V, PAV0 and N, and the visible accumulator window
+reads 0x00000000. N set means bit 47 is set, i.e. it clamped negative — but the
+products were positive, so per the pseudabove it must clamp to
+0x0000_7fff_ffff. `macsatf` takes its direction from `(result >> 63)` AFTER
+sign-truncating to 48 bits, which for an upward wrap is negative.
+Marked inferred rather than confirmed because the exact value a fractional
+`move.l ACCx,Dn` should return from a saturated accumulator has not been pinned
+down from the RM, so the observed 0x00000000 is suggestive, not decisive."""
+provenance = "measured 12 Aug 2026: 512 x mac.l 0x7FFFFFFF,0x7FFFFFFF from zero under MACSR 0xA0 gives MACSR 0x1AA"
+falsifier = """Change `macsatf` to take the direction from the product sign and
+clamp to emac_sat_value_positive_48; the same vector must then leave N clear.
+Until that is done and the fractional store window is pinned down, do not claim
+either way."""
+
+[claim.emac_conformance_passing]
+value = 8
+confidence = "measured-emu"
+what = """vectors passing in this suite against the patched
+build: integer mac, integer msac, fractional scale, fractional signedness,
+S/U store-rounding-to-16-bits, MACSR[N], MACSR[Z], and ACCext01 packing.
+☠ M1 is NOT complete -- saturation direction and the latch remain."""
+provenance = "make -C clean emac-conform, 12 Aug 2026"
+falsifier = "`make test-emac` — the count is regenerated on every run, and a drop is a regression in our patch, not a stale number"
+
+[claim.emac_conformance_known_unfixed]
+value = 2
+confidence = "measured-emu"
+what = """⏸ specified-but-unimplemented: OMC saturation DIRECTION (and value),
+and the OMC latch. ACCext01 packing was fixed 12 Aug 2026 and now returns
+0xFF000000 for a negative acc0, exactly per Table 5-6. M1 completes at zero."""
+provenance = "make -C clean emac-conform, 12 Aug 2026"
+
+# ☠ The latch is not missing from QEMU — it is deliberately disabled.
+falsifier = "`make test-emac`; this must fall to 0 before M1 is complete, and rises if a patch regresses"
+
+[claim.emac_qemu_latch_disabled_upstream]
+value = 3
+confidence = "read-disasm"
+what = """blocks in QEMU's translate.c that implement the sticky-saturation skip
+(`if (macsr & (MACSR_PAV0 << acc)) skip the accumulate`) and are wrapped in
+`#if 0` with the comment 'Disabled because conditional branches clobber
+temporary vars.' So RM Table 5-2's latching requirement is known-unimplemented
+upstream with a stated TCG reason, not merely overlooked. Re-enabling it needs
+the check moved into a helper that also performs the accumulate, since the
+saturate helper currently runs after the add and cannot see the pre-add value."""
+provenance = "vendor/qemu/target/m68k/translate.c, around the mac DISAS_INSN"

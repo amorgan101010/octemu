@@ -1,0 +1,44 @@
+peripherals: DMA registers are not pointer-servable
+
+The JIT may serve a memory read from a cached pointer. For a DMA register that
+is wrong twice over: a poll loop on a working cursor would read one value
+forever. Firmware that paces itself on a DMA status register then misses its
+checkpoint for tens of milliseconds at a time.
+
+diff --git a/source/dsp56kEmu/peripherals.cpp b/source/dsp56kEmu/peripherals.cpp
+index 67c3dfd8..18c520a0 100644
+--- a/source/dsp56kEmu/peripherals.cpp
++++ b/source/dsp56kEmu/peripherals.cpp
+@@ -537,26 +537,12 @@ namespace dsp56k
+ 		case XIO_DSR4:				return &m_dma.getDSR(4);		// DMA 4 Source Address Register
+ 
+ 		case XIO_DCR3:				return &m_dma.getDCR(3);		// DMA 3 Control Register
+-		case XIO_DCO3:				return &m_dma.getDCO(3);		// DMA 3 Counter
+-		case XIO_DDR3:				return &m_dma.getDDR(3);		// DMA 3 Destination Address Register
+-		case XIO_DSR3:				return &m_dma.getDSR(3);		// DMA 3 Source Address Register
+-
+-		case XIO_DCR2:				return &m_dma.getDCR(2);		// DMA 2 Control Register
+-		case XIO_DCO2:				return &m_dma.getDCO(2);		// DMA 2 Counter
+-		case XIO_DDR2:				return &m_dma.getDDR(2);		// DMA 2 Destination Address Register
+-		case XIO_DSR2:				return &m_dma.getDSR(2);		// DMA 2 Source Address Register
+-
+-		case XIO_DCR1:				return &m_dma.getDCR(1);		// DMA 1 Control Register
+-		case XIO_DCO1:				return &m_dma.getDCO(1);		// DMA 1 Counter
+-		case XIO_DDR1:				return &m_dma.getDDR(1);		// DMA 1 Destination Address Register
+-		case XIO_DSR1:				return &m_dma.getDSR(1);		// DMA 1 Source Address Register
+-
+-		case XIO_DCR0:				return &m_dma.getDCR(0);		// DMA 0 Control Register
+-		case XIO_DCO0:				return &m_dma.getDCO(0);		// DMA 0 Counter
+-		case XIO_DDR0:				return &m_dma.getDDR(0);		// DMA 0 Destination Address Register
+-		case XIO_DSR0:				return &m_dma.getDSR(0);		// DMA 0 Source Address Register
+-
+-		case XIO_DSTR:				return &m_dma.getDSTR();		// DMA Status Register
++		// DMA registers are NOT pointer-servable: a poll loop compiled by the
++		// JIT would cache the value and never observe the working cursor move.
++		// The Octatrack payload's block clock is exactly such a loop (it polls
++		// DSR2 for the ESAI feed's half-window checkpoints), and serving the
++		// pointer made it miss its checkpoint for tens of milliseconds at a
++		// time.
+ 		}
+ 
+ 		return nullptr;

@@ -1,0 +1,130 @@
+# The RECEIVE walk: what assets/receive.gif is a recording of. It needs the
+# customized image — out/receive-amp.bin, from 'make fw-receive-amp', the
+# variant whose trigs shape the machine's volume — and starts from
+# the out/fx fixture, the same set and empty project the demo walk uses:
+#
+#   the machine list, where RECEIVE stands in NEIGHBOR's slot
+#   SRC1 and SRC2 pointed at tracks 2 and 3
+#   LV1 and LV2 turned up together, so both tracks reach the mix
+#   record mode, every one of the sixteen steps at once, and a bar of it
+#
+# Record it with:
+#   tests/build-fixture.sh
+#   make fw-receive-amp
+#   make receive-gif
+#
+# ☠ RECEIVE is on TRACK 1 deliberately. Stock NEIGHBOR refuses tracks 1 and 5,
+# having no predecessor inside a DSP core's group of four; RECEIVE running
+# there is the whole point of the machine, so the film shows it there.
+#
+# ☠ Waits are in GUEST time (wait_guest_ms), not wall time. The emulator does
+# not hold realtime on a busy host — measured at load average 121, 52 s of
+# wall-clock waits gave the guest 5.0 s of audio and every gesture landed in
+# an Octatrack that had barely booted.
+#
+# ☠ Nothing here is saved; tests/walks/demo.jsonl says why at length. Unlike
+# that walk, this one holds the recording shut until the machine is up: the
+# splash is already in the other film and does not need showing twice.
+{"record":0}
+{"wait_text":"PTCH","timeout_ms":180000}
+# ☠ Not a settle: the firmware is still reading the set off the card behind
+# that dialog, and driving the panel before it closes loses keys.
+{"wait_gone":"L0ADING FILE5","timeout_ms":60000}
+{"wait_guest_ms":1500}
+{"record":1}
+# FUNC+SRC opens track 1's machine setup, where the list lives.
+{"press":"FUNC"}
+{"wait_guest_ms":250}
+{"tap":"SRC","until":"5RC 5ETUP","verify_ms":20000,"timeout_ms":150000}
+{"wait_guest_ms":200}
+{"release":"FUNC"}
+{"wait_guest_ms":700}
+# STATIC, FLEX, THRU, RECEIVE: three down the list, then YES to take it. The
+# right-hand half of the page is already RECEIVE's own SRC1..SRC6 by the time
+# the cursor lands on it.
+{"tap":"DOWN"}
+{"wait_guest_ms":350}
+{"tap":"DOWN"}
+{"wait_guest_ms":350}
+{"tap":"DOWN"}
+{"wait_guest_ms":500}
+{"tap":"YES"}
+{"wait_guest_ms":900}
+{"mark":"machine"}
+# The six slots are the six encoders, A..F, and they are edited HERE, on the
+# setup page — the playback page never shows them however many times SRC is
+# pressed.
+#
+# ☠ MEASURED, and twice: a slot moves one track per FOUR detents, not one —
+# asking for track 2 with two detents rounds to nothing and the film shows
+# OFF. And unlike the level parameters, a selector cares HOW FAST you turn:
+# the same eight detents paid out every 87 ms landed on track 1, and every
+# 45 ms landed on track 2. So these are eight and twelve detents at the pace
+# the measurement was made at, and the film is checked against the screen.
+{"encoder":0,"delta":1,"times":8,"over_ms":360,"wait_guest_ms":0}
+{"encoder":1,"delta":1,"times":12,"over_ms":540}
+{"wait_guest_ms":700}
+{"mark":"routed"}
+{"tap":"NO","until_gone":"5RC 5ETUP","verify_ms":10000,"timeout_ms":120000}
+{"wait_guest_ms":800}
+# Back on the playback page, the same six encoders are LV1..LV6 — how much of
+# each source reaches the mix. Both hands at once, as a player would.
+{"encoder":0,"delta":1,"times":100,"over_ms":2200,"wait_guest_ms":0}
+{"encoder":1,"delta":1,"times":100,"over_ms":2200}
+{"wait_guest_ms":700}
+{"mark":"levels"}
+# Grid recording, and then every step at once — both hands flat on the grid,
+# not sixteen taps in a row. The presses go out one main-loop pass apart, so
+# the keys land inside a quarter of a second and the film reads as one
+# gesture.
+#
+# ☠ The lamp numbers are BIT ids, two to a lamp, so trig N's "a trig lives
+# here" bit is 2*(N-1). Only the last one is gated: if step 16 lit, the chord
+# was seen, and the walk fails here rather than filming an empty pattern.
+{"tap":"REC"}
+{"wait_guest_ms":400}
+{"press":"TRIG1"}
+{"press":"TRIG2"}
+{"press":"TRIG3"}
+{"press":"TRIG4"}
+{"press":"TRIG5"}
+{"press":"TRIG6"}
+{"press":"TRIG7"}
+{"press":"TRIG8"}
+{"press":"TRIG9"}
+{"press":"TRIG10"}
+{"press":"TRIG11"}
+{"press":"TRIG12"}
+{"press":"TRIG13"}
+{"press":"TRIG14"}
+{"press":"TRIG15"}
+{"press":"TRIG16"}
+{"wait_guest_ms":250}
+{"release":"TRIG1"}
+{"release":"TRIG2"}
+{"release":"TRIG3"}
+{"release":"TRIG4"}
+{"release":"TRIG5"}
+{"release":"TRIG6"}
+{"release":"TRIG7"}
+{"release":"TRIG8"}
+{"release":"TRIG9"}
+{"release":"TRIG10"}
+{"release":"TRIG11"}
+{"release":"TRIG12"}
+{"release":"TRIG13"}
+{"release":"TRIG14"}
+{"release":"TRIG15"}
+{"release":"TRIG16"}
+{"wait_lamp":30,"lit":1,"timeout_ms":20000}
+{"wait_guest_ms":600}
+{"mark":"trigs"}
+# Bit 1 is trig 1's other channel: the playhead crossing step 1, which is the
+# evidence the transport actually started. One bar is four beats at the
+# project's 120 BPM, so 2000 ms of guest time is the bar.
+{"tap":"PLAY","until_lamp":1,"lit":1,"settle_ms":120,"verify_ms":5000,"timeout_ms":120000}
+{"wait_guest_ms":2000}
+{"panelshot":"out/receive/shot.ppm"}
+{"tap":"STOP"}
+{"wait_guest_ms":900}
+{"mark":"done"}

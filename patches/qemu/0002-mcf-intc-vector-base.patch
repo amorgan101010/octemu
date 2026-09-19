@@ -1,0 +1,82 @@
+hw/m68k/mcf_intc: make the interrupt vector base per-controller
+
+The vector was computed as `best + 64` for every controller. A part with two
+interrupt controllers — the MCF54455, for one — puts INTC0's sources at vector
+64 and INTC1's at 128, so the hardcoded base delivers the wrong vector for the
+second one. Add a `vector-base` property (64 by default, so existing boards are
+unchanged) and `mcf_intc_init_vec()` to set it.
+
+diff --git a/hw/m68k/mcf_intc.c b/hw/m68k/mcf_intc.c
+index e8d3bd9..82537d3 100644
+--- a/hw/m68k/mcf_intc.c
++++ b/hw/m68k/mcf_intc.c
+@@ -15,6 +15,7 @@
+ #include "hw/core/sysbus.h"
+ #include "hw/m68k/mcf.h"
+ #include "hw/core/qdev-properties.h"
++#include "hw/core/qdev-properties.h"
+ #include "qom/object.h"
+ 
+ #define TYPE_MCF_INTC "mcf-intc"
+@@ -26,6 +27,7 @@ struct mcf_intc_state {
+     MemoryRegion iomem;
+     uint64_t ipr;
+     uint64_t imr;
++    uint32_t vector_base;
+     uint64_t ifr;
+     uint64_t enabled;
+     uint8_t icr[64];
+@@ -52,7 +54,12 @@ static void mcf_intc_update(mcf_intc_state *s)
+             active >>= 1;
+         }
+     }
+-    s->active_vector = ((best == 64) ? 24 : (best + 64));
++    /*
++     * The vector base is per-controller. A part with two INTCs -- e.g. the
++     * MCF54455 -- puts INTC0's sources at 64 and INTC1's at 128, so a single
++     * hardcoded +64 delivers the wrong vector for the second controller.
++     */
++    s->active_vector = ((best == 64) ? 24 : (best + s->vector_base));
+     m68k_set_irq_level(s->cpu, best_level, s->active_vector);
+ }
+ 
+@@ -181,6 +188,8 @@ static void mcf_intc_instance_init(Object *obj)
+ static const Property mcf_intc_properties[] = {
+     DEFINE_PROP_LINK("m68k-cpu", mcf_intc_state, cpu,
+                      TYPE_M68K_CPU, M68kCPU *),
++    /* Per-controller vector base: 64 for a lone INTC, 128 for a second one. */
++    DEFINE_PROP_UINT32("vector-base", mcf_intc_state, vector_base, 64),
+ };
+ 
+ static void mcf_intc_class_init(ObjectClass *oc, const void *data)
+@@ -208,10 +217,17 @@ static void mcf_intc_register_types(void)
+ type_init(mcf_intc_register_types)
+ 
+ DeviceState *mcf_intc_init(MemoryRegion *sysmem, hwaddr base, M68kCPU *cpu)
++{
++    return mcf_intc_init_vec(sysmem, base, cpu, 64);
++}
++
++DeviceState *mcf_intc_init_vec(MemoryRegion *sysmem, hwaddr base, M68kCPU *cpu,
++                               uint32_t vector_base)
+ {
+     DeviceState  *dev;
+ 
+     dev = qdev_new(TYPE_MCF_INTC);
++    qdev_prop_set_uint32(dev, "vector-base", vector_base);
+     object_property_set_link(OBJECT(dev), "m68k-cpu",
+                              OBJECT(cpu), &error_abort);
+     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+diff --git a/include/hw/m68k/mcf.h b/include/hw/m68k/mcf.h
+index b2a599a..eac0396 100644
+--- a/include/hw/m68k/mcf.h
++++ b/include/hw/m68k/mcf.h
+@@ -14,6 +14,8 @@ DeviceState *mcf_uart_create(qemu_irq irq, Chardev *chr);
+ DeviceState *mcf_uart_create_mmap(hwaddr base, qemu_irq irq, Chardev *chr);
+ 
+ /* mcf_intc.c */
++DeviceState *mcf_intc_init_vec(struct MemoryRegion *sysmem, hwaddr base,
++                              M68kCPU *cpu, uint32_t vector_base);
+ DeviceState *mcf_intc_init(struct MemoryRegion *sysmem,
+                            hwaddr base, M68kCPU *cpu);
+ 

@@ -1,0 +1,110 @@
+accel/tcg: skip the notdirty invalidation walk for pages with no code
+
+Every store to a page marked notdirty takes the page collection lock and walks
+that page's translation blocks, even when the page holds no code at all — the
+common case for a guest whose data and code share a page granule.
+
+Track a conservative code extent per page (the offsets spanned by every TB ever
+linked there, widened and never shrunk). A store outside that extent provably
+overlaps no TB, so the walk can be skipped without taking the lock. The extent
+uses the same span arithmetic as the invalidator, so it cannot be narrower than
+the truth.
+
+diff --git a/accel/tcg/tb-maint.c b/accel/tcg/tb-maint.c
+index 4313864d2c..703246e713 100644
+--- a/accel/tcg/tb-maint.c
++++ b/accel/tcg/tb-maint.c
+@@ -191,6 +191,13 @@ struct PageDesc {
+     QemuSpin lock;
+     /* list of TBs intersecting this ram page */
+     uintptr_t first_tb;
++    /*
++     * Conservative extent, in offsets within the page, of every TB ever
++     * linked here: only widened, never shrunk. A store outside it provably
++     * overlaps no TB, so the invalidation walk can be skipped without taking
++     * the page collection lock. code_lo > code_hi means "no code".
++     */
++    uint32_t code_lo, code_hi;
+ };
+ 
+ void page_table_config_init(void)
+@@ -253,6 +260,8 @@ static PageDesc *page_find_alloc(tb_page_addr_t index, bool alloc)
+         pd = g_new0(PageDesc, V_L2_SIZE);
+         for (int i = 0; i < V_L2_SIZE; i++) {
+             qemu_spin_init(&pd[i].lock);
++            pd[i].code_lo = TARGET_PAGE_SIZE;      /* empty: lo > hi */
++            pd[i].code_hi = 0;
+         }
+ 
+         existing = qatomic_cmpxchg(lp, NULL, pd);
+@@ -699,9 +708,28 @@ static void tb_remove_all(void)
+ static void tb_page_add(PageDesc *p, TranslationBlock *tb, unsigned int n)
+ {
+     bool page_already_protected;
++    tb_page_addr_t tb_start, tb_last;
+ 
+     assert_page_locked(p);
+ 
++    /* Widen the page's code extent; same span arithmetic as the invalidator. */
++    tb_start = tb_page_addr0(tb);
++    tb_last = tb_start + tb->size - 1;
++    if (n == 0) {
++        tb_last = MIN(tb_last, tb_start | ~TARGET_PAGE_MASK);
++    } else {
++        tb_start = tb_page_addr1(tb);
++        tb_last = tb_start + (tb_last & ~TARGET_PAGE_MASK);
++    }
++    tb_start &= ~TARGET_PAGE_MASK;
++    tb_last &= ~TARGET_PAGE_MASK;
++    if (tb_start < p->code_lo) {
++        qatomic_set(&p->code_lo, tb_start);
++    }
++    if (tb_last > p->code_hi) {
++        qatomic_set(&p->code_hi, tb_last);
++    }
++
+     tb->page_next[n] = p->first_tb;
+     page_already_protected = p->first_tb != 0;
+     p->first_tb = (uintptr_t)tb | n;
+@@ -1214,7 +1242,40 @@ void tb_invalidate_phys_range_fast(CPUState *cpu, ram_addr_t start,
+ 
+     if (p) {
+         ram_addr_t last = start + len - 1;
+-        struct page_collection *pages = page_collection_lock(start, last);
++        struct page_collection *pages;
++
++        /*
++         * A page holding both hot code and hot data (bare-metal firmware
++         * does this routinely) never regains its DIRTY_MEMORY_CODE bit, so
++         * TLB_NOTDIRTY sticks and EVERY store to it lands here. Skip the
++         * collection lock and the TB walk when the store provably misses
++         * every TB on the page — measured at ~20% of vCPU time on the
++         * Octatrack board's audio path.
++         */
++        /*
++         * No TB on this page at all — a PageDesc exists only because it is
++         * allocated in blocks. The page is not really code-protected, so
++         * clear its protection once and let every later store take the fast
++         * path, instead of re-entering notdirty_write forever (measured on
++         * the Octatrack board: ~2200 such stores PER AUDIO BLOCK, all from
++         * firmware data that happens to sit near code).
++         */
++        if (qatomic_read(&p->first_tb) == 0) {
++            tlb_unprotect_code(start);
++            return;
++        }
++
++        /*
++         * The store provably misses every TB linked here, so invalidation
++         * would be a no-op: skip the page collection lock, the GTree
++         * allocation it makes and the precise-SMC TB lookup.
++         */
++        if ((start & ~TARGET_PAGE_MASK) > qatomic_read(&p->code_hi) ||
++            (last & ~TARGET_PAGE_MASK) < qatomic_read(&p->code_lo)) {
++            return;
++        }
++
++        pages = page_collection_lock(start, last);
+ 
+         tb_invalidate_phys_page_range__locked(cpu, pages, p,
+                                               start, last, ra);

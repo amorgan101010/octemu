@@ -1,0 +1,35 @@
+# The audio test: boot the out/fx2 fixture and fire TRIG9 three times.
+#
+# ☠ Every wait is in GUEST time (`wait_guest_ms` — the guest's own audio clock,
+# one block = 16 frames at 44.1 kHz), never wall time. This is what makes the
+# test mean the same thing twice. Measured on a host at load average 121, the
+# wall-clock version of this walk gave the guest 5.0 s of audio across 52 s of
+# waits: all three taps landed in an Octatrack that had barely booted and the
+# recording was SILENT (`tx slot peaks 2:9 5:6`), a red result from a green
+# emulator. The same walk in guest time returns three clean 440 Hz bursts on
+# the same loaded host. The run's --timeout stays wall-clock; it is the
+# backstop for a guest that has stopped producing audio at all.
+#
+# ☠ The first tap comes 16 s after PTCH, not 6. MEASURED, interleaved A/B on
+# one binary, quiet host: with the first tap 6 s after PTCH the walk is clean 16
+# of 27 runs; with it 16 s after PTCH, 14 of 14. Every failure is the FIRST tap
+# being ignored — the other two bursts come back at the reference peaks with
+# 100% of periods within a sample of ideal, and the device-side panel counters
+# read in=27 out=27 drop=0 keyframes=6, byte for byte the same as a passing run.
+# So the tap REACHES the guest and the guest is not yet ready to act on it.
+#
+# That wait is still a timer rather than an observable, which this repo's rule
+# says a wait should never be. It stays one because no screen or lamp is known
+# to change when the guest becomes ready; finding that observable is the fix.
+{"wait_text":"PTCH","timeout_ms":600000}
+{"wait_guest_ms":16000}
+{"mark":"t1"}
+{"tap":"TRIG9"}
+{"wait_guest_ms":12000}
+{"mark":"t2"}
+{"tap":"TRIG9"}
+{"wait_guest_ms":12000}
+{"mark":"t3"}
+{"tap":"TRIG9"}
+{"wait_guest_ms":12000}
+{"mark":"done"}

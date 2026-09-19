@@ -1,0 +1,35 @@
+dsp: a masked interrupt must not stop the peripherals
+
+Once injectInterrupt has swapped m_interruptFunc, returning early for a masked
+vector means the peripherals are never serviced again for as long as the mask
+holds — and the ESAI/ESSI clocks live inside them. On silicon a masked interrupt
+only defers the service routine: the flag stays pending and every peripheral
+keeps clocking regardless of the core's IPL.
+
+diff --git a/source/dsp56kEmu/dsp.cpp b/source/dsp56kEmu/dsp.cpp
+index db792a8..3867298 100644
+--- a/source/dsp56kEmu/dsp.cpp
++++ b/source/dsp56kEmu/dsp.cpp
+@@ -178,7 +178,22 @@ namespace dsp56k
+ 		const auto vba = interrupt;
+ 
+ 		if(isInterruptMasked(vba))
++		{
++			// A masked vector must not stop the chip.
++			//
++			// m_interruptFunc has already been swapped to this function by
++			// injectInterrupt, so returning here without servicing the peripherals
++			// means they are never serviced again for as long as the mask holds --
++			// and the ESAI/ESSI clocks live inside them. On real silicon a masked
++			// interrupt only defers the SERVICE ROUTINE: the flag stays pending and
++			// every peripheral keeps clocking regardless of the core's IPL.
++			//
++			// Observed on the Elektron Octatrack's DSP payload: the ESAI transmitted
++			// exactly one frame in 202 million retired instructions, while the DSP
++			// spun on a frame sync that could no longer arrive.
++			m_execPeripheralsFunc(this);
+ 			return;
++		}
+ 
+ 		// it is important that the processing mode is switched first before popping the vector to prevent a possible race condition in hasPendingInterrupt()
+ 		{

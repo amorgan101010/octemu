@@ -1,0 +1,24 @@
+# fetched or built dependencies, and everything derived from your OS image
+/vendor/
+/out/
+/downloads/
+
+# the two programs and their debug bundles
+/octdsp
+/octemu
+*.o
+*.dSYM/
+
+# generated panel assets: gen_svg.py is the source, the SVG and the element
+# registry are its output (make panel-svg regenerates both)
+/assets/panel/octatrack.svg
+/assets/panel/octatrack-elements.json
+
+# a gif is recorded to this beside its target and deleted on the way out; a
+# run that dies leaves one behind, and it is large
+*.recording.mkv
+
+# local scratch
+.DS_Store
+__pycache__/
+.claude/

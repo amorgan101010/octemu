@@ -1,0 +1,67 @@
+target/m68k: ISA_A+/C and EMAC_B on cfv4e, and a signed fractional multiply
+
+The cfv4e core lacked the ISA_A+/C and EMAC_B feature bits, so instructions a
+V4e part implements were rejected as illegal. HELPER(macmulf) also computed the
+1.31 x 1.31 product with an unsigned multiply, which is wrong for negative
+operands; multiply signed and shift left one to drop the redundant sign bit.
+
+diff --git a/target/m68k/cpu.c b/target/m68k/cpu.c
+index 9ad3057d91..bc4756cb5d 100644
+--- a/target/m68k/cpu.c
++++ b/target/m68k/cpu.c
+@@ -352,7 +352,9 @@ static void cfv4e_cpu_initfn(Object *obj)
+ 
+     m68k_set_feature(env, M68K_FEATURE_CF_ISA_A);
+     m68k_set_feature(env, M68K_FEATURE_CF_ISA_B);
++    m68k_set_feature(env, M68K_FEATURE_CF_ISA_APLUSC);
+     m68k_set_feature(env, M68K_FEATURE_BRAL);
+     m68k_set_feature(env, M68K_FEATURE_CF_FPU);
+     m68k_set_feature(env, M68K_FEATURE_CF_EMAC);
++    m68k_set_feature(env, M68K_FEATURE_CF_EMAC_B);
+     m68k_set_feature(env, M68K_FEATURE_USP);
+diff --git a/target/m68k/helper.c b/target/m68k/helper.c
+index 5f91d206f5..81498e8441 100644
+--- a/target/m68k/helper.c
++++ b/target/m68k/helper.c
+@@ -1125,17 +1125,22 @@ uint64_t HELPER(macmulf)(CPUM68KState *env, uint32_t op1, uint32_t op2)
+     uint64_t product;
+     uint32_t remainder;
+ 
+-    product = (uint64_t)op1 * op2;
++    int64_t sproduct;
++
++    /* 1.31 x 1.31 -> 2.62; the redundant sign bit is removed by <<1 -> 1.63. */
++    sproduct = (int64_t)(int32_t)op1 * (int32_t)op2;
++    sproduct <<= 1;
+     if (env->macsr & MACSR_RT) {
+-        remainder = product & 0xffffff;
+-        product >>= 24;
++        remainder = sproduct & 0xffffff;
++        sproduct >>= 24;
+         if (remainder > 0x800000)
+-            product++;
++            sproduct++;
+         else if (remainder == 0x800000)
+-            product += (product & 1);
++            sproduct += (sproduct & 1);
+     } else {
+-        product >>= 24;
++        sproduct >>= 24;
+     }
++    product = sproduct;
+     return product;
+ }
+ 
+diff --git a/target/m68k/translate.c b/target/m68k/translate.c
+index 138c89d3e5..5d641dacfe 100644
+--- a/target/m68k/translate.c
++++ b/target/m68k/translate.c
+@@ -5516,7 +5516,7 @@ DISAS_INSN(mac)
+     }
+ #endif
+ 
+-    if (insn & 0x100)
++    if (ext & 0x100)
+         tcg_gen_sub_i64(MACREG(acc), MACREG(acc), s->mactmp);
+     else
+         tcg_gen_add_i64(MACREG(acc), MACREG(acc), s->mactmp);

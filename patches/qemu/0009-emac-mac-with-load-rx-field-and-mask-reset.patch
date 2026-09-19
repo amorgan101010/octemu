@@ -1,0 +1,51 @@
+target/m68k: MAC-with-load reads Rx from the extension word, and MASK resets to all-ones
+
+Two independent defects in the same path:
+
+- MAC-with-load takes Rx entirely from the extension word (bit 15 selects A/D,
+  bits 14-12 the register number). The decoder read the data-register number
+  from the FIRST word instead, so the wrong register was multiplied. This
+  matches disas/m68k.c's 'o' operand, which reads ext[15:12].
+- The EMAC address MASK register is all-ones out of reset. MAC-with-load masks
+  its effective address with it, so leaving it zeroed made every such load read
+  address 0 and write a bogus address register back. Only an explicit
+  `move.l Rx,%mask` narrows it.
+
+--- a/target/m68k/cpu.c
++++ b/target/m68k/cpu.c
+@@ -176,6 +176,15 @@
+     cpu_m68k_set_fpcr(env, 0);
+     env->fpsr = 0;
+ 
++    /*
++     * The EMAC address MASK register is all-ones out of reset: MAC-with-load
++     * masks its effective address with it, so leaving it zeroed (as the
++     * memset above does) makes every such load read address 0 and write a
++     * bogus address register back. Only an explicit move.l Rx,%mask narrows
++     * it.
++     */
++    env->mac_mask = 0xffffffff;
++
+     /* TODO: We should set PC from the interrupt vector.  */
+     env->pc = 0;
+ }
+--- a/target/m68k/translate.c
++++ b/target/m68k/translate.c
+@@ -5454,7 +5454,16 @@
+         loadval = gen_load(s, OS_LONG, addr, 0, IS_USER(s));
+ 
+         acc ^= 1;
+-        rx = (ext & 0x8000) ? AREG(ext, 12) : DREG(insn, 12);
++        /*
++         * MAC with load takes Rx entirely from the extension word: bit 15
++         * selects A/D and bits 14-12 are the register number. Reading the
++         * data-register number from the FIRST word instead (as this did)
++         * silently multiplies by the wrong register — on the Octatrack that
++         * is the resampler's loop counter instead of the sample, which mutes
++         * ~20% of every STATIC voice. Matches disas/m68k.c's 'o' operand:
++         * val = (buffer[2] >> 4) | ...  i.e. ext[15:12].
++         */
++        rx = (ext & 0x8000) ? AREG(ext, 12) : DREG(ext, 12);
+         ry = (ext & 8) ? AREG(ext, 0) : DREG(ext, 0);
+     } else {
+         loadval = addr = NULL_QREG;

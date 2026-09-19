@@ -1,0 +1,41 @@
+hdi08: the host request is level-sensitive, so notify on every publish
+
+The DMA request is asserted for as long as the latch is empty, not on its
+transition: edge-only triggering strands a channel armed on a core whose HTDE
+never changes. A publish that replaces a stale latch word must also re-signal,
+or the host never learns the word arrived.
+
+diff --git a/source/dsp56kEmu/hdi08.cpp b/source/dsp56kEmu/hdi08.cpp
+index 0873e8a5..ccf2cc44 100644
+--- a/source/dsp56kEmu/hdi08.cpp
++++ b/source/dsp56kEmu/hdi08.cpp
+@@ -105,10 +105,11 @@ namespace dsp56k
+ //					LOG("Inject HTDE");
+ 					m_periph.getDSP().injectInterrupt(Vba_Host_Transmit_Data_Empty);
+ 				}
+-				if(!hadHTDE)
+-				{
+-					dmaTriggerTransmit();
+-				}
++				// Level, not edge: the DMA request is asserted for as long as
++				// the latch is empty. Edge-only triggering strands a channel
++				// armed on a core whose HTDE never transitions (it never
++				// publishes on its own, so the bit has been 1 since reset).
++				dmaTriggerTransmit();
+ 			}
+ 		}
+ 
+@@ -309,8 +310,12 @@ namespace dsp56k
+ 	{
+ 		if(!m_transmitDataAlwaysEmpty && !m_dataTX.empty())
+ 		{
+-			LOG("Write HDI08 HOTX: Discarding " << HEX(m_dataTX.front()) << ", HOTX is full, replacing with " << HEX(_val));
++			// Overwrite the stale latch word, but still notify: the host's
++			// request line is level-sensitive on RXDF and a publish that
++			// replaces a word must re-signal it, or the host never learns.
+ 			m_dataTX.front() = _val;
++			if(m_callbackTx)
++				m_callbackTx();
+ 			return;
+ 		}
+ 

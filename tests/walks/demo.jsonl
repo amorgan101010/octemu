@@ -1,0 +1,123 @@
+# The demo walk: what the README's GIF is a recording of. It starts from the
+# out/fx fixture — a set, an empty project, and SINE440.WAV sitting in the
+# set's AUDIO pool — and builds a playing pattern out of it:
+#
+#   the firmware's splash — the Elektron mark assembling out of particles —
+#     and then its LOADING FILES screen
+#   assign SINE440 to track 1's STATIC machine, slot 1
+#   back to the SRC page, PTCH / STRT / LEN / RATE visible
+#   record mode, trigs on steps 1, 5, 9 and 13
+#   PTCH up an octave and RATE down to its floor
+#   PLAY (record mode stays on — the hardware does not care), then the
+#   crossfader from B to A across two bars
+#
+# Record it with:
+#   tests/build-fixture.sh
+#   make demo-gif
+#
+# ☠ Waits are in GUEST time (wait_guest_ms), not wall time. The emulator does
+# not hold realtime on a busy host — measured at load average 121, 52 s of
+# wall-clock waits gave the guest 5.0 s of audio and every gesture landed in
+# an Octatrack that had barely booted.
+#
+# ☠ Nothing here is saved. The walk ends on STOP and the run exits, so the
+# fixture it was given is the fixture it leaves: run it twice and get the same
+# recording. Do not add the PROJ save from fixture-trig.jsonl.
+#
+# ☠ The film starts at the first frame, deliberately: the splash is an
+# ANIMATION of the Elektron mark assembling out of particles, it is running
+# by 0.3 s, and it carries no text for a wait_text to gate on. Anything that
+# waits before opening the recording misses it.
+{"wait_text":"PTCH","timeout_ms":180000}
+# ☠ Not a settle: the firmware is still reading the set off the card behind
+# that dialog, and driving the panel before it closes loses keys. Waiting for
+# it to GO is the observable the four-second guess used to stand in for.
+{"wait_gone":"L0ADING FILE5","timeout_ms":60000}
+# ☠ Do not cut this one down. The dialog closing is not the same as the
+# firmware being ready for a chord: with 500 ms here, the FUNC+SRC tap below
+# timed out on roughly one run in three, and it can never recover — FUNC is
+# still held while the tap retries, so every retry is the same held-key chord
+# the machine already ignored. MEASURED at 1500 ms: no failures.
+{"wait_guest_ms":1500}
+# The crossfader starts where the panel MCU parks it, at B. Say so anyway:
+# the recording should not depend on that default.
+{"crossfader":0}
+{"wait_guest_ms":300}
+# FUNC+SRC opens the machine setup for track 1, where the sample slot lives.
+{"press":"FUNC"}
+{"wait_guest_ms":250}
+{"tap":"SRC","until":"5RC 5ETUP","verify_ms":20000,"timeout_ms":150000}
+{"wait_guest_ms":200}
+{"release":"FUNC"}
+{"wait_guest_ms":350}
+# Two pages right is the slot list; YES loads the first file in the pool.
+{"tap":"RIGHT"}
+{"wait_guest_ms":300}
+{"tap":"RIGHT","until":"L0AD FILE T0 5TATIC 1","settle_ms":120,"verify_ms":20000,"timeout_ms":150000}
+{"wait_guest_ms":300}
+# ☠ The two until_gone taps below keep the full settle. Judging them early
+# can read the screen before the dialog has opened and call that "gone".
+{"tap":"YES","until_gone":"L0AD FILE T0 5TATIC 1","verify_ms":10000,"timeout_ms":180000}
+{"wait_guest_ms":600}
+{"mark":"assigned"}
+# NO leaves setup: the SRC page comes back, PTCH / STRT / LEN / RATE and all.
+{"tap":"NO","until_gone":"5RC 5ETUP","verify_ms":10000,"timeout_ms":120000}
+{"wait_text":"PTCH","timeout_ms":60000}
+{"wait_guest_ms":400}
+# Grid recording: REC lights, and a trig key toggles that step.
+#
+# ☠ The lamp numbers are BIT ids, not lamp ids — every lamp owns two, so trig
+# N's "a trig lives here" bit is 2*(N-1): 0, 8, 16, 24 for steps 1, 5, 9, 13.
+# Gating each tap on its own bit is what lets these run at a player's pace:
+# the step ends when the LED says the trig landed, not after a fixed settle,
+# and a lost key is retried instead of silently missing from the pattern.
+# settle_ms trims the pause before that judging starts, which is safe here
+# because the condition is positive — an early poll just polls again.
+{"tap":"REC"}
+{"wait_guest_ms":300}
+{"tap":"TRIG1","until_lamp":0,"lit":1,"settle_ms":120,"verify_ms":8000}
+{"tap":"TRIG5","until_lamp":8,"lit":1,"settle_ms":120,"verify_ms":8000}
+{"tap":"TRIG9","until_lamp":16,"lit":1,"settle_ms":120,"verify_ms":8000}
+{"tap":"TRIG13","until_lamp":24,"lit":1,"settle_ms":120,"verify_ms":8000}
+{"mark":"trigs-placed"}
+{"wait_guest_ms":400}
+# ☠ The encoder index is the KNOB, not the parameter's place on the screen:
+# knob-a..f are 0..5 and knob-level is 6, so on the playback page PTCH is
+# knob A (0) and RATE is knob D (3). LEV belongs to the Level knob, which is
+# why the screen's first column is not encoder 0.
+#
+# MEASURED, because neither parameter moves one unit per detent and neither
+# cares how fast you turn (12 detents read the same at 117 ms, 33 ms and
+# 12 ms apart, so nothing is lost at speed and no acceleration is applied):
+#
+#   PTCH  1/6 of a semitone a detent — 12 detents is +2.0, so an octave up
+#         is 72 of them
+#   RATE  one unit a detent, starting at +65 and stopping at -64 — 129 to
+#         reach the floor, and a few more cost nothing once it is there
+#
+# The turn hint saturates after twelve detents either way, so both of these
+# spend most of their length in its rotating state.
+#
+# Both hands at once: the first turn carries its own condition — a wait of no
+# time at all — so the walk starts it and moves straight on to the second,
+# which does the waiting for both. They are given the same length so they
+# finish together.
+{"encoder":0,"delta":1,"times":72,"over_ms":2600,"wait_guest_ms":0}
+{"encoder":3,"delta":-1,"times":132,"over_ms":2600}
+{"wait_guest_ms":500}
+{"mark":"knobs"}
+# Bit 1 is trig 1's other channel: the playhead crossing step 1. That is the
+# evidence the transport actually started. Record mode stays on.
+#
+# The slide is hung on the PLAY tap so it leaves with the key rather than a
+# beat later, once the tap has finished proving itself. One bar is four beats
+# at the project's 120 BPM, so 4000 ms of guest time is the two bars asked
+# for, and the wait below covers the slide plus the tap's own settle.
+{"tap":"PLAY","crossfader":255,"over_ms":4000,"until_lamp":1,"lit":1,"settle_ms":120,"verify_ms":5000,"timeout_ms":120000}
+{"mark":"playing"}
+{"wait_guest_ms":3700}
+{"mark":"faded"}
+{"wait_guest_ms":800}
+{"tap":"STOP"}
+{"wait_guest_ms":900}
+{"mark":"done"}

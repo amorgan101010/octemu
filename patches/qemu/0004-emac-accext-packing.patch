@@ -1,0 +1,74 @@
+target/m68k: pack ACCextnm with the even accumulator in the high half
+
+MCF54455RM Table 5-6 gives ACCext01 as ACC0U:ACC0L:ACC1U:ACC1L from bit 31
+down, i.e. the EVEN accumulator in the high half. QEMU had the two accumulators
+the other way round, so every extension byte read or written landed 16 bits
+from where the reference manual puts it, and a negative acc0 reported its
+sign-extension byte as ACC1U.
+
+The byte offsets within each accumulator were already right — in fractional
+mode macc[] carries 8 guard bits below the 32-bit result, so the extension byte
+is at bit 40 and the low byte at bit 0. Only the pairing was wrong, so this is
+a straight swap of the two halves in both directions.
+
+diff --git a/target/m68k/helper.c b/target/m68k/helper.c
+index 81498e8..f9ab646 100644
+--- a/target/m68k/helper.c
++++ b/target/m68k/helper.c
+@@ -1400,13 +1400,26 @@ uint32_t HELPER(get_macu)(uint64_t val)
+     }
+ }
+ 
++/*
++ * ACCextnm packs the extension and low bytes of TWO accumulators. Per
++ * MCF54455RM Table 5-6 the EVEN accumulator occupies the HIGH half:
++ *
++ *   bits 31-24  ACCnU   even accumulator, extension byte (macc >> 32)
++ *   bits 23-16  ACCnL   even accumulator, low byte
++ *   bits 15-8   ACCmU   odd accumulator, extension byte
++ *   bits  7-0   ACCmL   odd accumulator, low byte
++ *
++ * QEMU had the two accumulators the other way round, so every extension byte
++ * read or written landed 16 bits away from where the RM puts it: a negative
++ * acc0 reported its sign-extension byte as ACC1U.
++ */
+ uint32_t HELPER(get_mac_extf)(CPUM68KState *env, uint32_t acc)
+ {
+     uint32_t val;
+-    val = env->macc[acc] & 0x00ff;
+-    val |= (env->macc[acc] >> 32) & 0xff00;
+-    val |= (env->macc[acc + 1] << 16) & 0x00ff0000;
+-    val |= (env->macc[acc + 1] >> 16) & 0xff000000;
++    val = (env->macc[acc] >> 16) & 0xff000000;
++    val |= (env->macc[acc] << 16) & 0x00ff0000;
++    val |= (env->macc[acc + 1] >> 32) & 0xff00;
++    val |= env->macc[acc + 1] & 0x00ff;
+     return val;
+ }
+ 
+@@ -1418,19 +1431,20 @@ uint32_t HELPER(get_mac_exti)(CPUM68KState *env, uint32_t acc)
+     return val;
+ }
+ 
++/* Inverse of get_mac_extf, same Table 5-6 layout: even accumulator high. */
+ void HELPER(set_mac_extf)(CPUM68KState *env, uint32_t val, uint32_t acc)
+ {
+     int64_t res;
+     int32_t tmp;
+     res = env->macc[acc] & 0xffffffff00ull;
+-    tmp = (int16_t)(val & 0xff00);
+-    res |= ((int64_t)tmp) << 32;
+-    res |= val & 0xff;
+-    env->macc[acc] = res;
+-    res = env->macc[acc + 1] & 0xffffffff00ull;
+     tmp = (val & 0xff000000);
+     res |= ((int64_t)tmp) << 16;
+     res |= (val >> 16) & 0xff;
++    env->macc[acc] = res;
++    res = env->macc[acc + 1] & 0xffffffff00ull;
++    tmp = (int16_t)(val & 0xff00);
++    res |= ((int64_t)tmp) << 32;
++    res |= val & 0xff;
+     env->macc[acc + 1] = res;
+ }
+ 

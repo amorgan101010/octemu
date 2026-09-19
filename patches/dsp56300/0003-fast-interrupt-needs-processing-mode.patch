@@ -1,0 +1,86 @@
+jit: a low P address is not proof of a fast interrupt
+
+The fast-interrupt test was `_pc < Vba_End` alone — any address below the end of
+the vector table. A fast-interrupt block deliberately does not advance the PC,
+because the dispatcher restores it afterwards, so firmware that places ordinary
+code in the unused tail of the vector table executes one instruction forever.
+Require the processing mode as well.
+
+--- a/source/dsp56kEmu/jitblock.cpp
++++ b/source/dsp56kEmu/jitblock.cpp
+@@ -31,7 +31,41 @@ namespace dsp56k
+ 	{
+ 		const auto& opcodes = _dsp.opcodes();
+ 
+-		const bool isFastInterrupt = _pc < Vba_End;
++		// ☠ A low P address is not proof of an interrupt. This used to be
++		// `_pc < Vba_End` alone, i.e. any address below 0x100, and a fast-interrupt
++		// block deliberately does NOT advance the PC because the interrupt dispatcher
++		// restores it afterwards. Firmware that places ORDINARY CODE in the unused
++		// tail of the vector table therefore executes one instruction forever.
++		//
++		// The Elektron Octatrack's DSP payload does exactly that: its entry point is
++		// P:0x0040 and its first module runs to P:0x025f, so every instruction of it
++		// was compiled as a fast interrupt. Observed as ~200 million executions of
++		// P:0x0040 with the accumulator correctly loaded and the PC never moving.
++		//
++		// ☠ And the processing mode is not the authority either, because this result is
++		// CACHED. An earlier version of this patch tested
++		// `_dsp.getProcessingMode() == DSP::FastInterrupt`, which is RUNTIME state,
++		// and baked the answer into a block the JIT keys on PC alone
++		// (DSP::m_jitEntries[pc], compiled once and reused for ever). Whichever mode
++		// a vector address happened to be compiled in FIRST therefore won permanently.
++		//
++		// When it lost, the damage was silent and fatal. JitOps::jsr emits
++		// setDspProcessingMode(LongInterrupt) ONLY when the block has a
++		// fast-interrupt mode (jitops.cpp:782-806), so a vector compiled as an
++		// ordinary block still did its pushPCSR() but never switched mode;
++		// DSP::execInterrupt then saw `m_processingMode != LongInterrupt`, restored
++		// the PC (dsp.cpp:233-238) and ORPHANED THE PUSHED FRAME. One leaked stack
++		// entry per host command, on a 16-deep hardware stack, until an rts returned
++		// to nothing, the PC reached 0 and the core executed the reset vector.
++		// Observed as core 0 retiring at P:0xfff000 with sp=0x0001.
++		//
++		// ✓ The authority is the ADDRESS, as upstream had it — upstream's boundary is
++		// simply wrong for this firmware. The Octatrack payload's vector table ends
++		// at P:0x3E (int_ESAI_TransmitLastSlot, the last vector of the ESAI group)
++		// and its ordinary code starts at P:0x40. So the table ends at 0x40, not at
++		// Vba_End's 0x100, and a pure address test is both correct AND deterministic
++		// under a PC-keyed cache.
++		const bool isFastInterrupt = _pc < g_vbaEnd;
+ 
+ 		const TWord pcMax = isFastInterrupt ? (_pc + 2) : _dsp.memory().sizeP();
+ 
+@@ -236,7 +270,10 @@ namespace dsp56k
+ 
+ 		m_chain = _chain;
+ 
+-		const bool isFastInterrupt = _pc < Vba_End;
++		// See the note in getInfo: the vector table ends at g_vbaEnd, not at
++		// Vba_End, and this test must stay a pure address comparison because the
++		// result is cached in a block the JIT keys on PC alone.
++		const bool isFastInterrupt = _pc < g_vbaEnd;
+ 		const auto fastInterruptMode = isFastInterrupt ? (m_config.dynamicFastInterrupts ? JitOps::FastInterruptMode::Dynamic : JitOps::FastInterruptMode::Static) : JitOps::FastInterruptMode::None;
+ 
+ 		dspAsm.clear();
+diff --git a/source/dsp56kEmu/interrupts.h b/source/dsp56kEmu/interrupts.h
+index d9f04d02..5f06e60a 100644
+--- a/source/dsp56kEmu/interrupts.h
++++ b/source/dsp56kEmu/interrupts.h
+@@ -30,6 +30,16 @@ namespace dsp56k
+ 		Vba_End										= 0x100,
+ 	};
+ 
++	// Where the vector table actually ends, which is not Vba_End. Vba_End is the
++	// architectural top of the 56300 vector space; real firmware stops short and
++	// puts ordinary code in the tail, and the JIT's "is this a fast interrupt"
++	// test is an address comparison -- a boundary too high compiles ordinary code
++	// as two-word fast-interrupt blocks that never advance the PC.
++	// The Octatrack payload's last vector is at P:0x3E and its entry point P:0x40.
++	// Keep this an ADDRESS: JitBlock caches by PC and compiles each block once,
++	// so anything runtime-dependent here is frozen on first compile.
++	static constexpr unsigned g_vbaEnd = 0x40;
++
+ 	enum InterruptVectorAddress56303
+ 	{
+ 		Vba_TIMER0compare							= 0x24,			// TIMER 0 compare								

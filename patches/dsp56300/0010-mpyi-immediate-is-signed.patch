@@ -1,0 +1,24 @@
+jit: the MPYI/MACI immediate is a signed fraction
+
+MPYI, MACI, MPYRI and MACRI carry a 24-bit immediate in the second opcode word,
+and it is signed. The JIT path used it raw, so a negative coefficient was
+multiplied out as a large positive one — 0xfcf669 (-0.0237) behaved as +1.976.
+The interpreter path already sign-extends it.
+
+--- a/source/dsp56kEmu/jitops_alu.cpp
++++ b/source/dsp56kEmu/jitops_alu.cpp
+@@ -383,6 +383,14 @@ namespace dsp56k
+ 	{
+ //		assert( sr_test(SR_S0) == 0 && sr_test(SR_S1) == 0 );
+ 
++		// MPYI/MACI/MPYRI/MACRI carry their operand as a 24-bit immediate in
++		// the second opcode word, and it is a SIGNED fraction. It arrives here
++		// raw, so a negative coefficient was multiplied out as a large positive
++		// one — 0xfcf669 (-0.0237) behaved as +1.976. The interpreter path is
++		// already correct; it sign-extends via immediateDataExt.
++		if (_s2.isImmediate() && !_s2Unsigned)
++			_s2.set(signextend<int32_t, 24>(static_cast<int32_t>(_s2.imm24())), DspValue::Immediate24);
++
+ 		AluRef d(m_block, ab, _accumulate, true);
+ 
+ #ifdef HAVE_ARM64

@@ -1,0 +1,39 @@
+target/m68k: MAC-with-load is not a dual-accumulate form
+
+`dual` was derived from ext[1:0], but in the MAC-with-load encoding those bits
+are part of Ry's register field — this same function reads Ry as
+`(ext & 8) ? AREG(ext, 0) : DREG(ext, 0)` ten lines later. So any MAC-with-load
+whose Ry register number had either low bit set was decoded as a dual
+accumulate, and the product was accumulated a SECOND time into
+ACC((ext >> 2) & 3), corrupting an accumulator the code never named.
+
+binutils, which models EMAC_B (m68k:cfv4e), decodes
+
+    acd9 704e   macw %a6u,%d7l,%a1@+,%fp,%acc0
+
+as a single-accumulator MAC. In an interpolating resampler built from this form,
+nine of seventeen EMAC instructions tripped the test and every one of them
+scribbled into ACC3; because that accumulator is in use elsewhere, the
+corruption crossed between routines and showed up as pitch instability while a
+parameter moved.
+
+--- a/target/m68k/translate.c
++++ b/target/m68k/translate.c
+@@ -5437,7 +5437,16 @@
+     ext = read_im16(env, s);
+ 
+     acc = ((insn >> 7) & 1) | ((ext >> 3) & 2);
+-    dual = ((insn & 0x30) != 0 && (ext & 3) != 0);
++    /*
++     * MAC-with-load is never a dual-accumulate form.
++     * ext[3:0] is Ry's register field in that encoding (this function reads it
++     * as such two lines below), so testing ext[1:0] for a "dual" flag reads
++     * Ry's own register number. binutils (m68k:cfv4e, which models EMAC_B)
++     * decodes 0xacd9/0x704e as a single-accumulator `macw %a6u,%d7l,%a1@+,
++     * %fp,%acc0`, while this test calls it dual and accumulates the product a
++     * second time into ACC(ext>>2 & 3).
++     */
++    dual = 0;
+     if (dual && !m68k_feature(s->env, M68K_FEATURE_CF_EMAC_B)) {
+         disas_undef(env, s, insn);
+         return;

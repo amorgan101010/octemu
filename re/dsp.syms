@@ -1,0 +1,150 @@
+# re/dsp.syms — DSP56721 payload symbols (two DSP56300 cores), OS 1.40C.
+# One symbol per line: `name = addr; // core:N space:{P,X,Y} // prose`.
+# Core 0 is the codec/mixer core, core 1 the voice/FX core. Addresses are
+# 24-bit word addresses in the named space.
+
+# ---- core 0, P: the block loop and mixers ----
+blk_loop = 0x000040; // core:0 space:P // block loop entry, after the one-word HRDF release
+codec_poll = 0x00004a; // core:0 space:P // block-top DSR2 poll (P:0x4a-0x53); the codec's park — retirement here IS ESAI time
+bank_setup = 0x000054; // core:0 space:P // bank setup; the delivery margin is measured against the crossing into here
+rx_cursor_snap = 0x00007b; // core:0 space:P // snapshots DDR3 (the ESAI RX DMA's own address register) into rx_cursor, aligned to $40
+win_copy = 0x0000a5; // core:0 space:P // copies control words 0x2c-0x33 into the ICC window +0..$47 (P:0xa5-0xe5), then publishes mailbox 2
+level_builder = 0x0000f5; // core:0 space:P // turns delivered control words into per-track (MAIN, premix) target pairs (P:0xf5-0x165); position 17 = master output level
+input_conditioner = 0x0001cb; // core:0 space:P // multiplies the ESAI receive ring IN PLACE by a gain ramped toward ctl +0x23/+0x27; zero there erases the input
+mixer_blocktop = 0x000238; // core:0 space:P // block-top mixer: previous block's sum bank into MAIN by the MAIN levels
+mixer_normal = 0x00025b; // core:0 space:P // normal-mode mixer; also mixes 4 RX-ring words/frame (the DIR input monitor) at level positions 8-9
+mixer_master = 0x000292; // core:0 space:P // master variant (func_292): additionally stages the premix into track 8's stream slot
+output_stage = 0x0002ec; // core:0 space:P // P:0x2ec-0x35a: frame-row word k -> TX slot k+1; click injection; phones = (MAIN+CUE) x volume curve, L/R swap on ctl 0x2b bit 0
+master_t8_copy = 0x00041f; // core:0 space:P // func_41f: copies track 8's staged premix slot into the track buffer instead of rendering a voice
+split_24to16 = 0x00055a; // core:0 space:P // func_55a: 24-bit -> 2x16-bit splitter; run 4x per block into the recorder buffer (pair2, pair1, ring A/B, ring C/D)
+boot_hrdf_wait = 0x03000e; // core:0 space:P // post-upload wait for one HRDF word before entering blk_loop
+
+# ---- core 0, X ----
+rx_cursor = 0x000202; // core:0 space:X // block-top snapshot of the ESAI RX DMA cursor (live DDR3 read)
+frame_rows_ptr = 0x000203; // core:0 space:X // the mixers' 8-word frame-row destination
+ctl_base_ptr = 0x000205; // core:0 space:X // control block base (r0 of the output stage)
+rec_buf_ptr = 0x000206; // core:0 space:X // recorder buffer base; split_24to16 writes at +$100
+stream_slot_ptr = 0x000209; // core:0 space:X // per-track stream slot cursor, advanced $a8 per track; track 8's slot = +3*$a8
+vol_ramp_state = 0x000411; // core:0 space:X // output-stage volume-curve ramp state (x:$411-$414)
+dir_window_sel = 0x000437; // core:0 space:X // control word 0x36 bit 0: DIR ring window select, both mixer paths; guest sends 0
+ctl_bank0 = 0x002800; // core:0 space:X // delivered 64-word control block, bank 0; TX high-byte latch puts $03 in bits 23-16
+ctl_bank1 = 0x004800; // core:0 space:X // delivered control block, bank 1 (banks alternate per block)
+vol_curve = 0x006c00; // core:0 space:X // volume-curve LUT; curve[0] == 0 exactly — an unreported crossfader mutes the odd level half
+headroom_lut = 0x007400; // core:0 space:X // headroom LUT for the input conditioner; indexed by ctl +0x34/+0x35; zeroing 0x34 costs 55% of level
+esai_rx_ring = 0x008100; // core:0 space:X // 576-word ESAI receive ring ($8100-$8340), DSP-DMA ch3 from M_RX0, 4 words/frame — the audio INPUTS, not a loopback
+icc_window = 0x030000; // core:0 space:X // ICC: $30000-$3ffff aliases across P/X/Y of BOTH cores (one shm object); core B is booted through it
+
+# ---- core 0, Y ----
+ramp_rows = 0x000040; // core:0 space:Y // de-interleaved level rows: 10 MAIN then 10 premix per frame row
+mailbox = 0xffffd3; // core:0 space:Y // block-clock mailbox y:$ffffd3-d7: publishes the bank index 0/1, plus a 2 each block (not a boundary)
+
+# ---- inter-core control window (in the ICC alias) ----
+metro_flag = 0x030044; // core:1 space:X // click flag word: bit 4 arms, low nibble = frame offset, bit 5 accent (octave up), bit 6 TONAL; core 1 clears it as it arms
+metro_pitch = 0x030045; // core:1 space:X // click pitch; increment doubles every 12 semitones
+
+# ---- core 1, P: voice/FX core ----
+mbox_wait1 = 0x000057; // core:1 space:P // mailbox wait (parked state); transfers must land in the SECOND mailbox phase, after the 2
+mbox_wait2 = 0x00008d; // core:1 space:P // second mailbox wait (parked state)
+metro_render = 0x0000bf; // core:1 space:P // click synthesis with exponential envelope (P:0xbf-0x151); tests metro_flag bit 4 at P:0xb2
+fx1_id_read = 0x0002a1; // core:1 space:P // inside fx1_dispatch: reads the FX1 algorithm id from x:(r6+$1b) high byte; setup via fx_setup_table on id change, per-block via fx_process_table
+fx2_dispatch = 0x0002d7; // core:1 space:P // per-track FX2 dispatch, same shape
+fx_stub_setup = 0x000588; // core:1 space:P // shared setup handler for most ids 0-15, DELAY (id 8) included — NOT a null stub, DELAY works through it
+fx_stub_process = 0x000589; // core:1 space:P // shared per-block handler: a verbatim copy loop; where DELAY's echo is actually rendered is not established
+filter_setup = 0x000591; // core:1 space:P // FILTER (id 4) setup
+filter_process = 0x00059d; // core:1 space:P // FILTER per-block handler; as FX1, params are record words 6-11 (BASE/WDTH/Q/DPTH/ATK/DEC) read at x:(r6+0..5), r6=record base+6; BASE/WDTH corners sweep x2.85 per 16 units, measured
+flanger_setup = 0x000b56; // core:1 space:P // FLANGER (id 17) setup
+flanger_process = 0x000b63; // core:1 space:P // FLANGER per-block handler
+chorus_setup = 0x000c77; // core:1 space:P // CHORUS (id 18) setup
+chorus_process = 0x000c97; // core:1 space:P // CHORUS per-block handler; one 3069-word delay line
+plate_setup = 0x000dc0; // core:1 space:P // PLATE REV (id 20) setup: builds ten delay lines from plate_line_lens at the arena base
+plate_process = 0x000e15; // core:1 space:P // PLATE REV per-block handler; stashes r7/r6 at plate_saved_r7/r6
+spring_setup = 0x001012; // core:1 space:P // SPRING REV (id 21) setup
+spring_process = 0x00107e; // core:1 space:P // SPRING REV per-block handler; only algorithm touching scaling mode (bset/bclr #$b,sr at P:$1201/$123c)
+dark_setup = 0x001439; // core:1 space:P // DARK REV (id 22) setup
+dark_process = 0x0014db; // core:1 space:P // DARK REV per-block handler; warm-up mute writes x:(r7+$82) (0 for 256 blocks, then $800000)
+fx_mixer = 0x001807; // core:1 space:P // shared wet/dry mixer, called ONLY by PLATE (P:$100d) and DARK (P:$17df); multiplies wet by ZERO while x:(r7+$82) is zero (P:$1847)
+comb_setup = 0x001c8a; // core:1 space:P // COMB FILTER (id 19) setup
+comb_process = 0x001c9c; // core:1 space:P // COMB FILTER per-block handler
+
+# ---- core 1, X ----
+plate_saved_r7 = 0x0001fe; // core:1 space:X // PLATE's stashed slot-state base; a dump reveals which state block it used
+plate_saved_r6 = 0x0001ff; // core:1 space:X // PLATE's stashed record base
+fx_arena_base = 0x000213; // core:1 space:X // pointer to the delay arena base; plate_setup reads x:(x:$213)
+fx_setup_table = 0x000215; // core:1 space:X // 32-entry FX setup-handler table, X:$215+id; fully populated at boot
+fx_process_table = 0x000235; // core:1 space:X // 32-entry FX per-block-handler table, X:$235+id; ids 0-15 mostly fx_stub_process
+t1_fx2_state = 0x006200; // core:1 space:X // track 1 FX2 per-slot state base (the r7 for that slot)
+filter_sin_table = 0x006c00; // core:1 space:X // FILTER biquad sine (omega0) tuning table; 256-entry quarter-wave, k=0->0deg k=255->90deg. Positive control: sin^2+cos^2 = 1.0000 exactly against filter_cos_table. Read via a POSITIVE scale (mpyi +#$000800, P:0x7d4), NOT the negative-immediate curves (those are FLANGER/CHORUS/COMB)
+filter_cos_table = 0x006d00; // core:1 space:X // FILTER biquad cosine (omega0) table, companion to filter_sin_table
+plate_line_lens = 0x008045; // core:1 space:X // PLATE's line-length table, dump-verified: 02e 042 064 094 0de a76 99e 722 664 7ff 3ff; the first five are the short allpass lengths
+plate_moduli = 0x00804a; // core:1 space:X // the six long-line moduli (tail of plate_line_lens): a76 99e 722 664 7ff 3ff — match the known line lengths
+spring_lp_table = 0x00853c; // core:1 space:X // SPRING's LP table; runs into spring_decay1 for LP >= 116, on real hardware too (firmware's own data)
+spring_decay1 = 0x008630; // core:1 space:X // SPRING decay table 1 (smooth ascending fractions)
+spring_decay2 = 0x0086b0; // core:1 space:X // SPRING decay table 2
+spring_decay3 = 0x008730; // core:1 space:X // SPRING decay table 3
+dark_allpass_moduli = 0x0087bb; // core:1 space:X // DARK's allpass moduli, start $1c
+dark_line_lens = 0x0087be; // core:1 space:X // DARK's length table
+dark_write_moduli = 0x0087c3; // core:1 space:X // DARK's write-side moduli: 286 39a 560 7ff 260 380 50c 7ff — match the read-side immediates exactly
+
+# ---- core 1, Y ----
+fx1_arena = 0x001000; // core:1 space:Y // FX1 slot's delay arena (measured with CHORUS on FX1 alongside PLATE on FX2)
+fx2_arena = 0x004000; // core:1 space:Y // FX2 slot's delay arena; every delay-based effect allocates upward from here, per SLOT not per track
+
+
+# ---- payload extent ----
+# Occupancy tops below the ICC bridge (0x30000).
+# Core 1's FX payload is 106 reachable functions
+# sharing 0x1885 words of infrastructure; no effect has a PRIVATE code region
+# (all eight algorithms' handler closures converge on the same shared graph),
+# so a new effect adds handler + setup, not an isolated island.
+c0_p_top = 0x001fdf; // core:0 space:P // highest P word ever nonzero/changed (census)
+c0_x_top = 0x008d5b; // core:0 space:X // highest X word below ICC (census)
+c1_p_top = 0x001d9f; // core:1 space:P // core-1 FX payload ends here; 0x1da0 words total
+c1_x_top = 0x00881b; // core:1 space:X // highest X word below ICC (census); tables run to here
+c1_y_top = 0x007da3; // core:1 space:Y // highest Y word below ICC; the delay arenas' top — largest free gap is 0x7da4..0xc000
+
+
+# ---- core 1 voice render: per-track record delivery + gain chain ----
+# The per-track record is
+# copied verbatim into a PER-FRAME 32-word parameter block the voice renderer
+# reads; record word W lands at voice_frame_params + W, replicated at stride
+# 0x20 across the block's frames.
+voice_frame_params = 0x00025d; // core:1 space:X // per-frame copy of the 32-word track record (stride 0x20 across frames); record word W -> +W. The voice renderer reads these each frame
+voice_level_w3 = 0x000260; // core:1 space:X // per-frame gain from record word 3 (slot = word<<8, exactly linear); scales the voice output banks ~1:1 — measured: doubling word 3 doubles X:0x2000/0x4000. A per-track amplitude (track LEVEL / AMP VOL — not distinguished from the UI yet)
+voice_level_w4 = 0x000261; // core:1 space:X // per-frame gain from record word 4; also scales the voice output banks 2x when doubled — second stage of the per-track gain chain
+voice_level_w5 = 0x000262; // core:1 space:X // per-frame gain from record word 5; scales the voice output banks — third gain stage
+voice_level_w29 = 0x00027a; // core:1 space:X // per-frame gain from record word 29 (baseline 0x080000); also scales the voice output banks 2x when doubled
+voice_slot_bank0 = 0x002000; // core:1 space:X // per-voice-slot delivered-parameter bank 0 (stride 0x20 per slot, mirroring the 32-word record — offset k holds record word k); the gain words 3/4/5/29 sit here and scale the render, words 6/7 feed voice_filter_coefs
+voice_slot_bank1 = 0x004000; // core:1 space:X // per-voice-slot parameter bank 1 (the ping-pong half)
+voice_filter_coefs = 0x006404; // core:1 space:X // per-voice biquad filter coefficients (X:0x6404 b0=0x7f0000, then 0x11577e f6229d 00ce14 fea8ed... the classic b0/b1/b2/a1/a2 cascade); COMPUTED from record words 6 and 7 (measured: perturbing word 6 moves 0x6404/0x6405, word 7 moves 0x6404/0x640c) — a per-track tone/filter, NOT an amplitude
+# Record-word reach — what each of the 32 delivered record words actually
+# reaches downstream of the output banks:
+#   27, 28   FX1 / FX2 id: they select the whole FX handler.
+#   2, 5, 6, 7, 8, 29   coefficient and render math — the words behind pitch and
+#            the amp envelope's attack/hold/release, not individually named.
+#   3, 4     static levels.
+#   30       flags; bit 15 disables the voice outright.
+#   9-26     per-frame linear output scalers, no compute reach.
+# ☠ A static record word cannot express an LFO: the modulation IS the ColdFire
+# varying that word block to block, so anything about LFO rate or depth has to
+# come from a running Octatrack with those pages set off-default, not from pinning
+# a value.
+
+# ---- core 1, the voice synth pipeline ----
+# The amp envelope and the filter cutoff envelope are GENERATED ON THE DSP from
+# rate words in the record; the ColdFire delivers rates + note-on strobes, never
+# a running level. Sample pitch/rate, by contrast, is resolved on the ColdFire
+# (resampler_emac 0x40000fec) — core 1 gets already-resampled PCM, no pitch
+# number. The metronome (metro_render) is the one DSP-side pitched voice and the
+# template for adding a synth voice.
+amp_env_render = 0x00038b; // core:1 space:P // voice render + amp envelope entry (P:0x38b-0x513), called from P:0x22c; reads record word 30 (gate) at P:0x38b/0x3c1
+voice_note_gate = 0x0003c4; // core:1 space:P // note-on test on record word 30: brclr #12 (P:0x3c4) + brclr #16 (P:0x3c6); only strobe 0x01d0 (<<8 -> both bits set) enters the attack render
+amp_env_statemachine = 0x00043c; // core:1 space:P // ATK/REL integrator: attack P:0x43c-0x458 (reads record word 0 = ATK), release P:0x459-0x476 (reads word 2 = REL, neg to descend)
+amp_sample_mul = 0x0004cb; // core:1 space:P // sample x envelope multiply (mpy +x1,y0), then x VOL/BAL/XVOL pan P:0x4fe-0x511 into banks X:0x2000/X:0x4000
+env_rate_to_step = 0x000514; // core:1 space:P // maps an ATK/DEC/REL rate word to a per-block increment via env_rate_table; shared by amp (P:0x452/0x473) and filter (P:0x5d2/0x5da)
+amp_env_state_base = 0x006000; // core:1 space:X // per-voice amp-envelope state (r7=x:$020a): +0 stage, +3 attack acc, +5 release acc, +8/+9 current amplitude (boots 0x7fffff=full), +15..26 VOL/BAL/XVOL smoothing
+env_rate_table = 0x007400; // core:1 space:X // exponential time-constant curve (800000 80162c 802c55 ...) indexed by a rate word; the DSP envelopes' rate->step LUT
+filter_env_integrator = 0x0005ca; // core:1 space:P // 48-bit per-voice cutoff-envelope integrator (P:0x5ca-0x5e3), advanced by f(ATK)/-f(DEC) via env_rate_table; cutoff = BASE + (2*DPTH-1)*env at P:0x5eb-0x5f9
+filter_coef_lp = 0x0007a6; // core:1 space:P // FILTER lowpass coefficient generator (indexes filter_sin_table/filter_cos_table); highpass at P:0x7fd
+fx1_dispatch = 0x00029c; // core:1 space:P // FX1 dispatch: id=x:(record+27) P:0x2a1, r6 advanced +6 (n6) before jsr to x:(id+0x235); FX2 dispatch at P:0x2d0, r6 +12
+record_base_ptr = 0x000208; // core:1 space:X // per-track record base pointer (r6 source) for the amp/gate render; FX handlers enter with r6 = this +6 (FX1) / +12 (FX2)
+amp_env_level = 0x006008; // core:1 space:X // track-0 amp-envelope CURRENT level (base X:0x6000 +8); per-track blocks stride 0x300 (0x6000,0x6300,..). From an FX2 slot handler it is a fixed x:(r7-0x1f8) (FX2 r7 = amp-env base + 0x200) — how an FX voice reads the AMP-page contour

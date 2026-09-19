@@ -1,0 +1,14 @@
+# USB-MIDI TX demo: boot, hold for enumeration + gate pokes, then PLAY so the
+# sequencer emits clock/transport, then STOP. An external driver enumerates
+# the composite device (bringing EP2 up), pokes the sync-send gates, and
+# drains EP2 IN across the PLAY window (tests/usb-midi-demo.sh).
+{"wait_text":"PTCH","timeout_ms":600000}
+{"wait_guest_ms":8000}
+{"mark":"ready"}
+{"wait_guest_ms":15000}
+{"tap":"PLAY","until_lamp":1,"verify_ms":3000,"timeout_ms":60000}
+{"mark":"playing"}
+{"wait_guest_ms":10000}
+{"tap":"STOP"}
+{"wait_guest_ms":2000}
+{"mark":"done"}

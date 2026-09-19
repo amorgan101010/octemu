@@ -1,0 +1,96 @@
+dma: no proactive supply for host transfers, and honour a DE re-arm
+
+Two fixes to DMA lifecycle. A DSP-to-host channel must not be supplied
+proactively: the host paces it by reading, and supplying ahead parks a word in
+the transmit latch between transfers, where the next reader mistakes it for
+fresh data. And a DCR write with DE=1 while a self-clearing window is still open
+is a re-arm, not a no-op, so the channel must renew instead of stalling.
+
+diff --git a/source/dsp56kEmu/dma.cpp b/source/dsp56kEmu/dma.cpp
+index abafa593..5eaf7678 100644
+--- a/source/dsp56kEmu/dma.cpp
++++ b/source/dsp56kEmu/dma.cpp
+@@ -50,7 +50,8 @@ namespace dsp56k
+ 			case RequestSource::Essi1TransmitData:			return _p.getEssi1().getSR().test(Essi::SSISR_TDE);
+ 			case RequestSource::Essi1ReceiveData:			return _p.getEssi1().getSR().test(Essi::SSISR_RDF);
+ 			case RequestSource::Hi08ReceiveDataFull:		return _p.getHI08().readStatusRegister() & (1 << dsp56k::HDI08::HSR_HRDF);
+-			case RequestSource::Hi08TransmitDataEmpty:		return _p.getHI08().readStatusRegister() & (1 << dsp56k::HDI08::HSR_HTDE);
++			// Never peripheral-triggered; see the 56362 case below.
++			case RequestSource::Hi08TransmitDataEmpty:		return false;
+ 			default:
+ 				assert("Unsupported request source for 56303");
+ 				return false;
+@@ -65,7 +66,13 @@ namespace dsp56k
+ 			case RequestSource::EsaiReceiveData:			return _p.getEsai().getSR().test(Esai::M_RDF);
+ 			case RequestSource::EsaiTransmitData:			return _p.getEsai().getSR().test(Esai::M_TDE);
+ 			case RequestSource::HostReceiveData:			return _p.getHDI08().readStatusRegister() & (1 << dsp56k::HDI08::HSR_HRDF);
+-			case RequestSource::HostTransmitData:			return _p.getHDI08().readStatusRegister() & (1 << dsp56k::HDI08::HSR_HTDE);
++			// Never peripheral-triggered: DSP->host supply is demand-paced by
++			// the HOST's read (the Octatrack QEMU bridge pulls a word per port
++			// read via Dma::trigger). Proactive supply parks readback words in
++			// the transmit latch between transfers, and the Octatrack's frame
++			// ISR then mistakes one for the bank index the moment the frame
++			// interrupt is unmasked.
++			case RequestSource::HostTransmitData:			return false;
+ 			default:
+ 				assert("Unsupported request source for 56362");
+ 				return false;
+@@ -114,7 +121,20 @@ namespace dsp56k
+ 	void DmaChannel::setDCR(const TWord _controlRegister)
+ 	{
+ 		if(m_dcr == _controlRegister)
++		{
++			// A DCR write with DE=1 while a self-clearing window is still
++			// running RENEWS the enable: at expiry the channel reloads its
++			// countdown and keeps going instead of clearing DE. The address
++			// phase is untouched — the Octatrack's ESAI feed (DCR2=0xCC6220,
++			// dual-counter source wrapping via DOR2) writes this keep-alive
++			// once per audio block, mid-window, and both dropping it (channel
++			// strands disabled, DSP spins on a DSR2 checkpoint forever) and
++			// reinitialising the counters (address phase escapes the ring)
++			// are measurably wrong.
++			if (m_armed && bitvalue(m_dcr, De) && isDEClearedAfterTransfer())
++				m_deRenewed = true;
+ 			return;
++		}
+ 
+ 		// Re-configuration: drop any previous trigger registration and clear the armed flag
+ 		// so arm() can re-initialize the working counters with the new DCR settings.
+@@ -809,8 +829,25 @@ namespace dsp56k
+ 
+ 	void DmaChannel::finishTransfer()
+ 	{
++
+ 		if(isDEClearedAfterTransfer())
++		{
++			if (m_deRenewed)
++			{
++				// Renewed mid-window (see setDCR): reload the countdown, keep
++				// the address phase, stay armed.
++				m_deRenewed = false;
++				m_dma.removeTriggerTarget(this);
++				m_armed = false;
++				m_dma.clearActiveChannel();
++				const auto dsr = m_dsr, ddr = m_ddr;
++				arm();
++				m_dsr = dsr;
++				m_ddr = ddr;
++				return;
++			}
+ 			m_dcr &= ~(1 << De);
++		}
+ 
+ 		m_dma.clearActiveChannel();
+ 
+diff --git a/source/dsp56kEmu/dma.h b/source/dsp56kEmu/dma.h
+index 9979c8fc..41b4d2cd 100644
+--- a/source/dsp56kEmu/dma.h
++++ b/source/dsp56kEmu/dma.h
+@@ -165,6 +165,7 @@ namespace dsp56k
+ 		bool m_dsrWritten = false;
+ 		bool m_ddrWritten = false;
+ 		bool m_armed = false;
++		bool m_deRenewed = false;
+ 
+ 		TWord m_dcoh = 0;
+ 		TWord m_dcom = 0;

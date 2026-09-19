@@ -1,0 +1,2 @@
+e8d693e12a tests/qtest: Do not use versioned pc-q35-5.2 machine anymore
+v11.1.0-13-ge8d693e12a

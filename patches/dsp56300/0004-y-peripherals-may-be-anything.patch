@@ -1,0 +1,28 @@
+dsp: accept any Y-side peripherals
+
+execPeripherals<Ta,Tb> casts and executes perif[0] only — Tb is a tag, not a
+cast — so a machine whose Y side is a custom IPeripherals matched no template
+case at all. With the assert compiled out in a release build that returned
+nullptr into both m_execPeripheralsFunc and m_interruptFunc, i.e. a call through
+a null pointer on the first instruction the core retires. Accept any Y
+peripherals as a last resort instead.
+
+--- a/source/dsp56kEmu/dsp.cpp
++++ b/source/dsp56kEmu/dsp.cpp
+@@ -69,6 +69,16 @@
+ 		if(const auto func = findExecPeripheralsFuncT<Peripherals56362, Peripherals56367>(_pX, _pY))	return func;
+ 		if(const auto func = findExecPeripheralsFuncT<Peripherals56303, PeripheralsNop>(_pX, _pY))		return func;
+ 		if(const auto func = findExecPeripheralsFuncT<PeripheralsNop, PeripheralsNop>(_pX, _pY))		return func;
++		// The Y peripherals are MATCHED BUT NEVER USED: execPeripherals<Ta,Tb> casts and
++		// execs perif[0] only, and its perif[1] line is commented out. So a machine whose
++		// Y side is a custom IPeripherals -- the Octatrack's DSP56721 has an inter-core
++		// mailbox at y:$ffffd3..$ffffd7 -- matched NOTHING here, and with the assert
++		// compiled out in a release build this returned nullptr into both
++		// m_execPeripheralsFunc and m_interruptFunc. That is a call through a null
++		// pointer on the first instruction the core retires. Accept any Y peripherals as
++		// a last resort instead; Tb is a tag, not a cast.
++		if(const auto func = findExecPeripheralsFuncT<Peripherals56362, IPeripherals>(_pX, _pY))	return func;
++		if(const auto func = findExecPeripheralsFuncT<Peripherals56303, IPeripherals>(_pX, _pY))	return func;
+ 		assert(false && "Peripherals configuration is not supported");
+ 		return nullptr;
+ 	}

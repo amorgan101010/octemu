@@ -1,0 +1,11 @@
+# MIDI RX trig test: boot and hold ~40 s of guest time with MAIN recorded.
+# The host injects notes through the --midi bridge during the hold: a note on
+# a channel nobody listens to
+# (negative control), then a note on audio track 1's TRIG CH — only the
+# latter should put the track-1 sample on MAIN. Exits cleanly so the
+# recording finalizes.
+{"wait_text":"PTCH","timeout_ms":600000}
+{"wait_guest_ms":8000}
+{"mark":"ready"}
+{"wait_guest_ms":40000}
+{"mark":"done"}

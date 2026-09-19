@@ -1,0 +1,17 @@
+esai: drop the per-underrun log line
+
+An underrun is an ordinary condition for a host-paced feed, and logging one per
+frame drowns the log and costs more time than the transfer it reports on.
+
+diff --git a/source/dsp56kEmu/esai.cpp b/source/dsp56kEmu/esai.cpp
+index 5bf0bd7d..df9e955c 100644
+--- a/source/dsp56kEmu/esai.cpp
++++ b/source/dsp56kEmu/esai.cpp
+@@ -379,7 +379,6 @@ namespace dsp56k
+ 
+ 		if((m_writtenTX & tem) != tem)
+ 		{
+-			LOG("ESAI transmit underrun, written is " << HEX(m_writtenTX) << ", enabled is " << HEX(tem));
+ 			m_sr.set(M_TUE);
+ 		}
+ 

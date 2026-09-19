@@ -1,0 +1,199 @@
+accel/tcg: a retired-guest-instruction budget with a callback
+
+Adds an optional budget, independent of icount: count retired guest
+instructions with icount's own decrementer, and when a quantum expires at a TB
+boundary, refill it and call a hook. The hook runs on the vCPU thread with
+consistent CPU state and no BQL held.
+
+It exists to couple a second emulated chip to guest progress rather than to
+host time: both chips then advance in a fixed ratio, the way two crystals fix
+them in hardware, and a run is reproducible. TBs are instrumented only when
+icount or this budget asks for it, and CF_NOIRQ blocks — which have no exit
+label to leave through — are left alone.
+
+diff --git a/accel/tcg/cpu-exec.c b/accel/tcg/cpu-exec.c
+index 257211235d..e0c92ef9c8 100644
+--- a/accel/tcg/cpu-exec.c
++++ b/accel/tcg/cpu-exec.c
+@@ -37,6 +37,7 @@
+ #include "exec/log.h"
+ #include "qemu/main-loop.h"
+ #include "exec/icount.h"
++#include "exec/ot-insn-budget.h"
+ #include "exec/replay-core.h"
+ #include "system/tcg.h"
+ #include "exec/helper-proto-common.h"
+@@ -752,6 +753,25 @@ static inline bool cpu_handle_exception(CPUState *cpu, int *ret)
+     return false;
+ }
+ 
++uint32_t ot_insn_budget;
++void (*ot_insn_budget_hook)(void);
++static uint64_t ot_insn_whole_quanta;
++
++uint64_t ot_insn_retired(void)
++{
++    if (!ot_insn_budget) {
++        return 0;
++    }
++    return ot_insn_whole_quanta
++         + (ot_insn_budget - first_cpu->neg.icount_decr.u16.low);
++}
++
++void ot_insn_budget_enable(uint32_t quantum, void (*hook)(void))
++{
++    ot_insn_budget = quantum < TCG_MAX_INSNS ? TCG_MAX_INSNS : quantum;
++    ot_insn_budget_hook = hook;
++}
++
+ void tcg_kick_vcpu_thread(CPUState *cpu)
+ {
+     /*
+@@ -908,6 +928,20 @@ static inline void cpu_loop_exec_tb(CPUState *cpu, TranslationBlock *tb,
+     }
+ 
+     /* Instruction counter expired.  */
++    if (ot_insn_budget) {
++        /*
++         * The Octatrack guest-instruction budget, not icount. Refill it and
++         * give the other chip the slice of its own time that the guest just
++         * earned. This is a TB boundary on the vCPU thread: CPU state is
++         * consistent and no BQL is held. See exec/ot-insn-budget.h.
++         */
++        ot_insn_whole_quanta += ot_insn_budget;
++        cpu->neg.icount_decr.u16.low = ot_insn_budget;
++        if (ot_insn_budget_hook) {
++            ot_insn_budget_hook();
++        }
++        return;
++    }
+     assert(icount_enabled());
+ #ifndef CONFIG_USER_ONLY
+     /* Ensure global icount has gone forward */
+diff --git a/accel/tcg/translator.c b/accel/tcg/translator.c
+index cd7d079fe0..c1445a3be9 100644
+--- a/accel/tcg/translator.c
++++ b/accel/tcg/translator.c
+@@ -15,6 +15,7 @@
+ #include "accel/tcg/cpu-mmu-index.h"
+ #include "exec/target_page.h"
+ #include "exec/translator.h"
++#include "exec/ot-insn-budget.h"
+ #include "exec/plugin-gen.h"
+ #include "tcg/tcg-op-common.h"
+ #include "internal-common.h"
+@@ -44,15 +45,23 @@ static TCGOp *gen_tb_start(DisasContextBase *db, uint32_t cflags)
+ {
+     TCGv_i32 count = NULL;
+     TCGOp *icount_start_insn = NULL;
++    /*
++     * Count guest instructions when icount asks for it, and also when the
++     * Octatrack budget does (see exec/ot-insn-budget.h): same decrementer,
++     * same exit path, a different refill. The CF_NOIRQ case has no exit label
++     * to leave through, so it cannot carry a budget either.
++     */
++    const bool count_insns = (cflags & CF_USE_ICOUNT) ||
++                             (ot_insn_budget && !(cflags & CF_NOIRQ));
+ 
+-    if ((cflags & CF_USE_ICOUNT) || !(cflags & CF_NOIRQ)) {
++    if (count_insns || !(cflags & CF_NOIRQ)) {
+         count = tcg_temp_new_i32();
+         tcg_gen_ld_i32(count, tcg_env,
+                        offsetof(CPUState, neg.icount_decr.u32) -
+                        sizeof(CPUState));
+     }
+ 
+-    if (cflags & CF_USE_ICOUNT) {
++    if (count_insns) {
+         /*
+          * We emit a sub with a dummy immediate argument. Keep the insn index
+          * of the sub so that we later (when we know the actual insn count)
+@@ -76,7 +85,7 @@ static TCGOp *gen_tb_start(DisasContextBase *db, uint32_t cflags)
+         tcg_gen_brcondi_i32(TCG_COND_LT, count, 0, tcg_ctx->exitreq_label);
+     }
+ 
+-    if (cflags & CF_USE_ICOUNT) {
++    if (count_insns) {
+         tcg_gen_st16_i32(count, tcg_env,
+                          offsetof(CPUState, neg.icount_decr.u16.low) -
+                          sizeof(CPUState));
+@@ -88,10 +97,11 @@ static TCGOp *gen_tb_start(DisasContextBase *db, uint32_t cflags)
+ static void gen_tb_end(const TranslationBlock *tb, uint32_t cflags,
+                        TCGOp *icount_start_insn, int num_insns)
+ {
+-    if (cflags & CF_USE_ICOUNT) {
++    if (icount_start_insn) {
+         /*
+          * Update the num_insn immediate parameter now that we know
+-         * the actual insn count.
++         * the actual insn count. (Testing the op rather than the cflag: the
++         * sub is also emitted for the Octatrack instruction budget.)
+          */
+         tcg_set_insn_param(icount_start_insn, 2,
+                            tcgv_i32_arg(tcg_constant_i32(num_insns)));
+diff --git a/include/exec/ot-insn-budget.h b/include/exec/ot-insn-budget.h
+new file mode 100644
+index 0000000000..47097d70dd
+--- /dev/null
++++ b/include/exec/ot-insn-budget.h
+@@ -0,0 +1,60 @@
++/*
++ * A GUEST-INSTRUCTION budget, with icount OFF.
++ *
++ * The Octatrack machine hosts a DSP56721 whose time is its own instruction
++ * retirement, next to a ColdFire whose time is QEMU's. On silicon those are
++ * two crystals in a fixed ratio; here nothing ties them, so orderings that
++ * hardware guarantees by a ~100x margin are resolved by a host-scheduler race
++ * between the vCPU thread and a DSP worker thread.
++ *
++ * This is the tie. It is icount's decrementer with icount's clock removed:
++ * every TB subtracts its instruction count from neg.icount_decr.u16.low and
++ * exits the chain when the budget underflows, at which point cpu_loop_exec_tb
++ * refills it and calls a hook. The hook runs on the vCPU thread at a TB
++ * boundary — CPU state consistent, no BQL held — which makes it a safe point
++ * to advance the other chip.
++ *
++ * Why not -icount itself: icount also drives QEMU_CLOCK_VIRTUAL from the
++ * instruction count and then SLEEPS the vCPU to keep the virtual clock from
++ * running ahead of the host. This machine has no throughput to give away to
++ * that, and it does not need device timers to be deterministic — only the DSP
++ * ordering. See SINGLE-THREAD-PLAN.md, Phase 1(b).
++ *
++ * Scope: this fixes DSP <-> ColdFire ordering. It does NOT fix
++ * device-timer <-> ColdFire ordering; with icount off QEMU_CLOCK_VIRTUAL
++ * still tracks host time.
++ *
++ * SPDX-License-Identifier: MIT
++ */
++#ifndef OT_INSN_BUDGET_H
++#define OT_INSN_BUDGET_H
++
++/* Guest instructions per quantum. ZERO DISABLES EVERYTHING: gen_tb_start then
++ * emits the stock preamble and cpu_loop_exec_tb keeps the stock assert, so an
++ * unconfigured machine is bit-for-bit the upstream code path. */
++extern uint32_t ot_insn_budget;
++extern void (*ot_insn_budget_hook)(void);
++
++/*
++ * Arm the budget. Must be called during machine init, BEFORE the first TB is
++ * translated — the decrementer lives in the TB preamble, so TBs generated
++ * while it was off would never decrement.
++ *
++ * The quantum is clamped up to TCG_MAX_INSNS: a TB may hold that many
++ * instructions and the check runs at the TB's ENTRY, so a smaller quantum
++ * could never be satisfied and that TB would re-exit at its own entry forever.
++ */
++void ot_insn_budget_enable(uint32_t quantum, void (*hook)(void));
++
++/*
++ * Guest instructions retired since the budget was armed.
++ *
++ * This is the only clock in the machine that is a function of GUEST PROGRESS
++ * rather than of the host, which makes it the right unit for anything that
++ * wants to say "N instructions from now" or "this has been waiting too long".
++ * Exact to the instruction: whole quanta plus however much of the current one
++ * the decrementer has already spent.
++ */
++uint64_t ot_insn_retired(void);
++
++#endif

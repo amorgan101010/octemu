@@ -1,0 +1,27 @@
+hw/m68k/mcf_intc: a forced request bypasses the mask
+
+Arbitration masked forced requests along with real ones. Per the MCF54455
+interrupt controller, INTFRC is independent of IMR: a source whose mask bit
+stays set for the life of the machine still reaches the CPU when software
+forces it. Firmware that forces its timer tick from another ISR, and never
+unmasks that source at all, otherwise runs with the tick frozen.
+
+--- a/hw/m68k/mcf_intc.c
++++ b/hw/m68k/mcf_intc.c
+@@ -42,7 +42,15 @@
+     int best;
+     int best_level;
+ 
+-    active = (s->ipr | s->ifr) & s->enabled & ~s->imr;
++    /*
++     * A forced request (INTFRC) bypasses the mask. The Octatrack firmware
++     * forces source 32 (its sequencer tick) from the audio frame ISR while
++     * IMRH bit 0 stays set for the machine's whole life -- no CIMR write of
++     * 32 and no direct IMRH store exist anywhere in its image -- yet the
++     * sequencer demonstrably runs on hardware. Masking forced requests
++     * leaves the transport playing with the step clock frozen.
++     */
++    active = ((s->ipr & ~s->imr) | s->ifr) & s->enabled;
+     best_level = 0;
+     best = 64;
+     if (active) {

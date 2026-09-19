@@ -1,0 +1,115 @@
+dma: DCOL is twelve bits in 2D mode, not eight
+
+2D mode splits the DMA counter 12/12 (DSP56300FM ch.10), and DCOH was already
+extracted as DCO[23:12], so masking DCOL with 0xff contradicted it. A DCO of
+0x23F loaded 0x3F, so the channel wrapped after 64 words instead of 576 and
+then subtracted its (negative) offset register every 64 words, walking the
+destination cursor down out of its buffer and over unrelated memory.
+
+diff --git a/source/dsp56kEmu/dma.cpp b/source/dsp56kEmu/dma.cpp
+index bd3e603..abafa59 100644
+--- a/source/dsp56kEmu/dma.cpp
++++ b/source/dsp56kEmu/dma.cpp
+@@ -156,7 +156,16 @@ namespace dsp56k
+ 		else
+ 		{
+ 			m_dcohInit = m_dco >> 12;
+-			m_dcolInit = m_dco & 0xff;
++			// DCOL is TWELVE bits, not eight. DCOH is extracted as DCO[23:12] just
++			// above, so a 0xff mask here contradicts it: 2D mode splits DCO 12/12
++			// (DSP56300FM ch.10). With 0xff a DCO of 0x23F loaded 0x3F, so the channel
++			// took its wrap branch after 64 words instead of 576 and then SUBTRACTED
++			// the (negative) DOR every 64 words, walking the destination cursor DOWN
++			// out of its buffer. Observed on the Octatrack's ESAI receive channel
++			// (DCO3 = 0x23F, DOR3 = -575): audio samples landed on the DSP payload's
++			// module pointer table in low X memory and the core jumped through one.
++			// The transmit channel hid it -- DCO2 = 0xFF fits in eight bits.
++			m_dcolInit = m_dco & 0xfff;
+ 
+ 			m_dcoh = m_dcohInit;
+ 			m_dcol = m_dcolInit;
+@@ -696,6 +705,84 @@ namespace dsp56k
+ 			return true;
+ 		}
+ 
++		if((agmS == AddressGenMode::DualCounterDOR0 || agmS == AddressGenMode::DualCounterDOR1 ||
++			agmS == AddressGenMode::DualCounterDOR2 || agmS == AddressGenMode::DualCounterDOR3) &&
++			agmD == AddressGenMode::SingleCounterAnoUpdate)
++		{
++			// Dual-counter SOURCE feeding a fixed peripheral DESTINATION. This is how
++			// the Elektron Octatrack's DSP payload feeds the ESAI: DCR2 = 0xCC6220 is
++			// source DualCounterDOR2, destination SingleCounterAnoUpdate (= M_TX0),
++			// word-triggered by ESAI transmit data, with the offset in DOR2.
++			//
++			// Without this branch the pair falls through to the assert at the end of
++			// execTransfer, which a release build compiles out -- so the function
++			// returned "block finished" without moving a word, finishTransfer() then
++			// cleared DE, and the channel never ran again. Silent, and it presents as
++			// a DSP that spins forever waiting for a DMA cursor that never advances.
++			const auto dorIndex = static_cast<TWord>(agmS) - static_cast<TWord>(AddressGenMode::DualCounterDOR0);
++
++			if(isRequestTrigger())
++			{
++				memWrite(areaD, m_ddr, memRead(areaS, m_dsr));
++				return dualModeIncrement(m_dsr, m_dma.getDOR(dorIndex));
++			}
++
++			bool finished = false;
++			while(!finished)
++			{
++				memWrite(areaD, m_ddr, memRead(areaS, m_dsr));
++				finished = dualModeIncrement(m_dsr, m_dma.getDOR(dorIndex));
++			}
++			return true;
++		}
++
++		if(agmS == AddressGenMode::SingleCounterAnoUpdate && isPeripheralAddr(areaS, m_dsr) &&
++			(agmD == AddressGenMode::DualCounterDOR0 || agmD == AddressGenMode::DualCounterDOR1 ||
++			 agmD == AddressGenMode::DualCounterDOR2 || agmD == AddressGenMode::DualCounterDOR3))
++		{
++			// The RECEIVE half, and the mirror of the branch above: a fixed peripheral
++			// SOURCE (M_RX0) feeding a dual-counter DESTINATION. The Octatrack's
++			// DCR3 = 0xAC59C0 decodes to DAM source 4 (SingleCounterAnoUpdate) and DAM
++			// destination 3 (DualCounterDOR3), DTM 5 (WordTriggerRequest), walking a
++			// 576-word buffer at X:0x8100.
++			//
++			// Without this the pair fell through to the assert at the end of
++			// execTransfer, which a release build compiles out, so the channel reported
++			// "block finished" having moved nothing: the cursor advanced exactly ONCE
++			// and no external audio ever reached the DSP.
++			const auto dorIndex = static_cast<TWord>(agmD) - static_cast<TWord>(AddressGenMode::DualCounterDOR0);
++
++			// The counters MUST be reloaded when the block completes. DTM 5 does not
++			// clear DE, so the channel stays armed and keeps being triggered -- and
++			// dualModeIncrement leaves m_dcol/m_dcoh at zero, which makes every later
++			// word take the wrap branch and SUBTRACT the (negative) DOR again. Observed
++			// without this reload: the cursor walked 0x000073..0xffff67 instead of
++			// staying in its 576-word buffer, scattering audio across X memory and
++			// clobbering the payload's own pointers (x:0x202 wild 60 times of 61).
++			const auto blockDone = [this]()
++			{
++				m_dcol = m_dcolInit;
++				m_dcoh = m_dcohInit;
++				return true;
++			};
++
++			if(isRequestTrigger())
++			{
++				memWrite(areaD, m_ddr, memRead(areaS, m_dsr));
++				if(dualModeIncrement(m_ddr, m_dma.getDOR(dorIndex)))
++					return blockDone();
++				return false;
++			}
++
++			bool finished = false;
++			while(!finished)
++			{
++				memWrite(areaD, m_ddr, memRead(areaS, m_dsr));
++				finished = dualModeIncrement(m_ddr, m_dma.getDOR(dorIndex));
++			}
++			return blockDone();
++		}
++
+ 		if(agmS == AddressGenMode::SingleCounterApostInc && agmD == AddressGenMode::DualCounterDOR1)
+ 		{
+ 			// 2D mode, can be either line or word

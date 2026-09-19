@@ -1,0 +1,13 @@
+# USB-MIDI TX stress: boot, PLAY early, then HOLD long so the sequencer
+# emits a sustained clock/transport stream while an external driver drains
+# EP2 IN and checks the drop counter (tests/usb-midi-stress.sh).
+{"wait_text":"PTCH","timeout_ms":600000}
+{"wait_guest_ms":6000}
+{"mark":"ready"}
+{"wait_guest_ms":6000}
+{"tap":"PLAY","until_lamp":1,"verify_ms":3000,"timeout_ms":60000}
+{"mark":"playing"}
+{"wait_guest_ms":90000}
+{"tap":"STOP"}
+{"wait_guest_ms":2000}
+{"mark":"done"}

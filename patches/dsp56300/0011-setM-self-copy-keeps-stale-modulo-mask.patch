@@ -1,0 +1,60 @@
+jit: setM's copy-from-source shortcut is wrong when the source is the same register
+
+setM derives the cached modulo/mask pair from its source, and when the source IS
+the destination the write is an in-place modification (bset/bclr/bchg on Mn)
+arriving through a pooled reference. Copying the register's own cached pair then
+keeps the PRE-modification values, and the next AGU update computes r|mod
+instead of the wrapped address — so a `move m1,m4 / bset #$f,m4 / (r4)-n4`
+ring-buffer idiom addresses outside its buffer. Fall through to the dynamic
+derivation instead.
+
+diff --git a/source/dsp56kEmu/jitdspregs.cpp b/source/dsp56kEmu/jitdspregs.cpp
+index 54a365d5..7341cef1 100644
+--- a/source/dsp56kEmu/jitdspregs.cpp
++++ b/source/dsp56kEmu/jitdspregs.cpp
+@@ -133,10 +133,15 @@ namespace dsp56k
+ 			return;
+ 		}
+ 
+-		// if the source is an M reg too we can copy the previously calculated values from the source
++		// if the source is an M reg too we can copy the previously calculated values from the source.
++		// NOT when it is the SAME M register: that is an in-place modification (bset/bclr/bchg on Mn)
++		// arriving through a pooled reference, and "copying" the register's own cached modulo/mask
++		// pair would keep the PRE-modification values. Observed with the DSP56721 Octatrack payload's
++		// `move m1,m4 / bset #$f,m4 / (r4)-n4` idiom: the AGU update then executes with a stale pair
++		// and computes r|mod instead of the wrapped address. Fall through to the dynamic derivation.
+ 		const auto dspReg = _src.getDspReg().dspReg();
+ 
+-		if(dspReg >= DspM0 && dspReg <= DspM7)
++		if(dspReg >= DspM0 && dspReg <= DspM7 && static_cast<TWord>(dspReg - DspM0) != _agu)
+ 		{
+ 			const auto m = dspReg - DspM0;
+ 
+diff --git a/source/dsp56kEmu/jitops_alu.inl b/source/dsp56kEmu/jitops_alu.inl
+index 2a59b693..d9bc69c5 100644
+--- a/source/dsp56kEmu/jitops_alu.inl
++++ b/source/dsp56kEmu/jitops_alu.inl
+@@ -89,6 +89,23 @@ namespace dsp56k
+ 			return;
+ 		}
+ 
++		// M0..M7: never modify through a pooled reference. setM() derives the
++		// cached modulo/mask pair from its source, and when the source IS the
++		// same M register (as a ref here), its copy-from-source shortcut copies
++		// the register's own PRE-modification pair — leaving mod/mask stale for
++		// the new value. A subsequent (Rn)+-Nn then executes with a wrong mask
++		// (observed: `move m1,m4; bset #$f,m4; (r4)-n4` computing r|mod instead
++		// of the wrapped address). Materialize a temp so setM takes its dynamic
++		// derivation path.
++		if(dddddd >= 0x20 && dddddd < 0x28)
++		{
++			DspValue d(m_block);
++			decode_dddddd_read(d, dddddd);
++			(this->*_bitmodFunc)(d, getBit<Inst>(op));
++			decode_dddddd_write(dddddd, d);
++			return;
++		}
++
+ 		auto dRead = decode_dddddd_ref(dddddd, true, false);
+ 		if(!dRead.isRegValid())
+ 			decode_dddddd_read(dRead, dddddd);

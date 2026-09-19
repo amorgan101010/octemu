@@ -1,0 +1,31 @@
+# ☠ Waits are in GUEST time (wait_guest_ms), not wall time. The emulator does
+# not hold realtime on a busy host — measured at load average 121, 52 s of
+# wall-clock waits gave the guest 5.0 s of audio and every gesture landed in
+# an Octatrack that had barely booted.
+{"wait_text":"TIME","timeout_ms":8000}
+{"tap":"YES","until_gone":"TIME"}
+{"wait_text":"PTCH"}
+{"tap":"PROJ"}
+{"wait_text":"CHANGE"}
+{"tap":"YES"}
+{"wait_text":"CHANGE"}
+{"tap":"YES"}
+{"wait_text":"M0UNTED"}
+{"tap":"YES","until_gone":"M0UNTED"}
+{"wait_text":"CH005E A 5ET"}
+{"wait_guest_ms":1200}
+{"tap":"YES"}
+{"wait_text":"NAME THE NEW"}
+{"wait_guest_ms":400}
+{"tap":"YES","double":1,"until_gone":"NAME THE NEW"}
+{"wait_text":"CH005E PR0JECT"}
+{"wait_guest_ms":1200}
+{"tap":"YES"}
+{"wait_text":"NAME THE NEW"}
+{"wait_guest_ms":400}
+{"tap":"YES","double":1,"until_gone":"NAME THE NEW"}
+{"wait_text":"PTCH"}
+{"tap":"PLAY","until_lamp":1,"verify_ms":5000,"timeout_ms":900000}
+{"wait_guest_ms":2000}
+{"tap":"STOP"}
+{"wait_guest_ms":3000}

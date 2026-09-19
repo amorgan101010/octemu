@@ -1,0 +1,44 @@
+hw/m68k/mcf_intc: implement writes to INTFRCH/INTFRCL
+
+INTFRCH (+0x10) and INTFRCL (+0x14) are the software interrupt-force registers.
+Both offsets were already readable and `s->ifr` already took part in
+arbitration, but neither had a write case: writes fell through to the default
+label, were logged as a bad offset and discarded. No bit could ever be set,
+which leaves the feature inert while looking half-present — a driver reads back
+0 and has no other signal.
+
+Any driver that defers work by forcing a lower-priority source silently loses
+that work; a ColdFire firmware that hands off from a high-IPL receive ISR to a
+parser at a lower IPL simply never runs the parser. Semantics are plain
+read/write level per MCF54455RM 17.3.6 — software sets a bit to force the
+source and clears it to release, with no write-1-to-clear — so the two cases
+mirror the INTFRCH/INTFRCL reads above them and fall through to the existing
+mcf_intc_update().
+
+diff --git a/hw/m68k/mcf_intc.c b/hw/m68k/mcf_intc.c
+--- a/hw/m68k/mcf_intc.c
++++ b/hw/m68k/mcf_intc.c
+@@ -124,6 +124,23 @@
+     case 0x0c:
+         s->imr = (s->imr & 0xffffffff00000000ull) | (uint32_t)val;
+         break;
++    /*
++     * INTFRCH / INTFRCL -- software interrupt force. Both offsets were already
++     * READABLE and s->ifr already participates in arbitration
++     * (active = (ipr | ifr) & enabled & ~imr), but writes fell through to the
++     * default case and were discarded as a guest error, so nothing could ever
++     * set a bit. Any driver that hands work to a lower-priority level by forcing
++     * its source silently loses it.
++     *
++     * Read/write level semantics, per MCF54455RM 17.3.6: software sets a bit to
++     * force the source and clears it to release. No write-1-to-clear.
++     */
++    case 0x10:
++        s->ifr = (s->ifr & 0xffffffffull) | ((uint64_t)val << 32);
++        break;
++    case 0x14:
++        s->ifr = (s->ifr & 0xffffffff00000000ull) | (uint32_t)val;
++        break;
+     case 0x1c:
+         if (val & 0x40) {
+             s->imr = ~0ull;

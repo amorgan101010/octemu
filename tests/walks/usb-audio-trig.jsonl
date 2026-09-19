@@ -1,0 +1,24 @@
+# USB-audio P4 walk: boot, announce "ready" (so the harness starts capturing),
+# then fire TRIG9 repeatedly through track 1's SINE440 while the host pulls the
+# iso stream. The first tap is 16 s after PTCH (the settled first-trig window,
+# tests/walks/trig-one.jsonl), then more taps so a burst is caught whenever the
+# capture's window lands. A long final hold keeps the Octatrack alive for the
+# capture + the recording flush. Every wait is GUEST time.
+{"wait_text":"PTCH","timeout_ms":600000}
+{"wait_guest_ms":8000}
+{"mark":"ready"}
+{"wait_guest_ms":8000}
+{"mark":"t1"}
+{"tap":"TRIG9"}
+{"wait_guest_ms":6000}
+{"tap":"TRIG9"}
+{"wait_guest_ms":6000}
+{"tap":"TRIG9"}
+{"wait_guest_ms":6000}
+{"tap":"TRIG9"}
+{"wait_guest_ms":6000}
+{"tap":"TRIG9"}
+{"wait_guest_ms":6000}
+{"tap":"TRIG9"}
+{"wait_guest_ms":60000}
+{"mark":"done"}

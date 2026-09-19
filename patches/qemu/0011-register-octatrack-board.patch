@@ -1,0 +1,81 @@
+hw/m68k: build the Elektron Octatrack MKII board
+
+Build wiring only. The device sources — the MCF54455 board (RAM/CS regions,
+DSPI + DS1390 RTC, PIT x4, DTIM x4, eDMA, MBAR/GPIO strap, NVRAM), the on-chip
+ATA and CompactFlash, the panel link, the DSP host-port window and the two
+DSP56721 cores — are copied into hw/m68k/ by scripts/build-qemu.sh, so this
+patch never goes stale against them.
+
+diff --git a/hw/m68k/meson.build b/hw/m68k/meson.build
+index 84bc68fa4e..ddd7449e57 100644
+--- a/hw/m68k/meson.build
++++ b/hw/m68k/meson.build
+@@ -5,4 +5,68 @@ m68k_ss.add(when: 'CONFIG_NEXTCUBE', if_true: files('next-kbd.c', 'next-cube.c')
+ m68k_ss.add(when: 'CONFIG_Q800', if_true: files('q800.c', 'q800-glue.c'))
+ m68k_ss.add(when: 'CONFIG_M68K_VIRT', if_true: files('virt.c'))
+ 
++# ---------------------------------------------------------------------------
++# The Elektron Octatrack MKII board, its ATA controller, its panel UART and a
++# real DSP56721 behind its HDI24 host port.
++#
++# The device sources are COPIED into hw/m68k/ by the repo's
++# scripts/build-qemu.sh rather than patched in, so this patch is pure build
++# wiring and cannot go stale against them. It rides CONFIG_MCF5208 because the
++# Octatrack is an MCF5xxx part and that symbol already pulls in mcf_intc.c,
++# which the board needs.
++#
++# Two things that each cost a build to discover:
++#
++# 1. The C++ shim CANNOT be added to m68k_ss. Meson adds -I<srcroot> to every
++#    target, QEMU's source root contains a file named `version`, and libc++'s
++#    internal `#include <version>` then resolves to it — every C++ header in
++#    the translation unit fails with "expected unqualified-id: 11.1.50". Hence
++#    its own static_library with implicit_include_directories: false. Quoted
++#    includes still work: they always search the including file's directory.
++#
++# 2. QEMU only HAS a C++ compiler when `plugins` is enabled — meson.build:84,
++#    `enable_cpp = host_os == 'windows' or get_option('plugins')`. A
++#    --disable-plugins build does not compile the shim at all. The flag costs
++#    nothing to keep: with no plugin loaded the instrumentation hooks are
++#    branch-skipped in the TRANSLATION path, and this machine translates almost
++#    nothing in steady state (TB flush count 0).
++#
++# Build the vendored core RelWithDebInfo, never Release: base.cmake appends
++# -flto on macOS, so a Release .a holds LLVM bitcode rather than object code.
++# ---------------------------------------------------------------------------
++dsp56300_src = run_command(sh, '-c', 'printf %s "${OCTATRACK_DSP56300:-}"',
++                           check: true).stdout()
++dsp56300_bld = run_command(sh, '-c', 'printf %s "${OCTATRACK_DSP56300_BUILD:-}"',
++                           check: true).stdout()
++
++if dsp56300_src == '' or dsp56300_bld == ''
++  error('the octatrack board needs OCTATRACK_DSP56300 and ' +
++        'OCTATRACK_DSP56300_BUILD set at configure time — see build-qemu.sh')
++endif
++
++octdsp = static_library('octdsp',
++  sources: files('ot-dsp-shim.cc', 'ot-dsp56k.cc'),
++  include_directories: [
++    include_directories(dsp56300_src / 'source'),
++    include_directories(dsp56300_src / 'source' / 'asmjit' / 'src'),
++  ],
++  cpp_args: ['-DDSP56300_DEBUGGER=0', '-DASMJIT_STATIC'],
++  implicit_include_directories: false,
++  build_by_default: false)
++
++dsp56300 = declare_dependency(
++  link_with: octdsp,
++  # The vendored archives in dependency order, plus the C++ runtime: the final
++  # link is driven by the C compiler, which would not pull libc++ in itself.
++  link_args: [
++    dsp56300_bld / 'source' / 'dsp56kEmu' / 'libdsp56kEmu.a',
++    dsp56300_bld / 'source' / 'dsp56kBase' / 'libdsp56kBase.a',
++    dsp56300_bld / 'source' / 'asmjit' / 'libasmjit.a',
++    '-lc++',
++  ])
++
++m68k_ss.add(when: 'CONFIG_MCF5208',
++            if_true: [files('ot-board.c', 'ot-ata.c', 'ot-dsp-port.c',
++                            'ot-panel-uart.c'), dsp56300])
++
+ hw_arch += {'m68k': m68k_ss}

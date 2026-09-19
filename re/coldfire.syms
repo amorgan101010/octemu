@@ -1,0 +1,768 @@
+# re/coldfire.syms — ColdFire (MCF54455) symbols for Octatrack OS 1.40C, whose
+# MAIN blob loads at 0x40000400. One symbol per line:
+#
+#     name = addr; // attrs // what it is
+#
+# Attrs: type:{func,code,data,io}, size:0xN, region:{image,lowram,sram,sdram,nvram}.
+# type:code is a label on an instruction that is NOT a function entry — a loop, a
+# jump-table trampoline — so a disassembler should carve no function there.
+#
+# This file holds only what is true of the image: what a symbol IS, and the traps
+# worth knowing before relying on one. How each was established is not recorded
+# here: what a symbol is, and the traps worth knowing before relying on one.
+
+# ---- kernel / scheduler ----
+pit0_ctx_switch = 0x40000550; // type:func size:0x58 region:image // preemptive context switch, the single entry for BOTH reschedule paths (PIT0's 10 ms tick and the forced INTC1 source — it acks INTFRCH1 bit 11 at 0x40000582): mask IPL7, save regfile into current TCB+12, take next task off the ready queue, W1C PIT0 PIF, rte
+k_task_exit_thunk = 0x400006e4; // type:func region:image // return address planted above a new task's frame by kernel init (0x40000df8): clears its own TCB runnable flag +76 and blocks forever
+sem_post = 0x400008b0; // type:func region:image // semaphore post; reads and updates the ready queue at 0x800068d8, so scheduler and semaphores agree about who is runnable
+k_mutex_lock = 0x400009f4; // type:func region:image // mutex lock: masks to IPL7, owner := current_task when free, else blocks the caller on the owner's wait chain (TCB +76/+80); 45 jsr sites
+k_queue_post = 0x40000c3c; // type:func region:image // message-queue post: IPL7-masked ring write (buf +20, wridx +24, mask +16, count +4), wakes the waiter at +12 through the ready queue; 136 jsr + 13 jmp = 149 sites
+k_queue_recv = 0x40000d00; // type:func region:image // blocking receive: spins on count +4 around the wait primitive at 0x40000818, dequeues under IPL7, returns the message in d0
+k_default_exception_handler = 0x40000d74; // type:func region:image // written into all 256 vectors by the init loop at 0x40000dbc; saves SP to k_exception_hook_sp, calls [k_exception_hook_ptr] with it if nonzero
+k_boot_task_entry = 0x4001f834; // type:func region:image // priority-0 boot task entry, planted into k_boot_tcb by kernel init; programs CACR 0xa50ce100 and ACR0 0x4007e020 (0x40000000-0x47ffffff cacheable copyback, all modes); ends in idle_loop
+k_level7_panic = 0x4001fca0; // type:func region:image // level-7 handler: mask, two calls (0x40014a10, 0x40014960), then bras . forever
+k_pit1_timeout_service = 0x40020d38; // type:func region:image // PIT1 handler: W1C PIF, disable, post the event at 0x460bcdb4 — the one-shot sleep/timeout service
+k_exception_reporter = 0x4003af94; // type:func region:image // formats the exception frame and bit-bangs it out UART1 by polling (0xfc064004 status, 0xfc06400c tx)
+k_ata_ring_post = 0x4001568c; // type:func region:image // posts into the ATA-private async ring; flag argument selects base 0x46c85fd2 or 0x46c8c5a4
+idle_loop = 0x4001fc9c; // type:func region:image // idle task: a self-chained bra .; dominant PC of an idle Octatrack
+swtimer_expire = 0x400136a8; // type:func region:image // called by swtimer_sweep when a software timer expires
+swtimer_sweep = 0x4001387c; // type:func region:image // sweep of 136 software timers; the expensive work PIT0 occasionally dispatches mid-sequence (hot PC 0x400138d2)
+swtimer_task = 0x4005593c; // type:func region:image // dedicated task: blocks on the counting semaphore at 0x46c7e0e2, sweeps once per post; sole caller of swtimer_sweep
+
+# ---- audio block path (ColdFire side) ----
+voice_routine = 0x40004100; // type:func region:image // emits (phase,count) pairs into scratch at 0x800062ac; tail copies them into stream staging; ends 0x40004266
+staging_copier = 0x4000875a; // type:code region:image // 16-bit-mono variant loop of the straight stream-staging copier (duplicates L/R); one of four loops behind copier_dispatch
+copier_dispatch = 0x40008752; // type:code size:0x8 region:image // the copier's 4-entry bras trampoline, indexed by jmp %pc@(0x40008752,%d1:l:2) on the mode byte a2@(30)
+resampler_emac = 0x40000fec; // type:func region:image // EMAC interpolating resampler entry (table-called, no direct jsr; frame lea -44(sp), args on the stack); the image's heaviest EMAC user; bit-identical to the straight copier for 44.1 kHz at 1:1
+resampler_dispatch = 0x40001038; // type:code size:0x8 region:image // the resampler's 4-entry bras trampoline, indexed by jmp %pc@(0x40001038,%d7:l:2) on the mode byte a0@(30)
+resampler_loop_w = 0x40001040; // type:code region:image // 16-bit variant loop (trampoline idx 2): word fetches, mac.w into ACC0, movclr per output pair
+resampler_loop_wdual = 0x40001062; // type:code region:image // dual-accumulator 16-bit variant loop (idx 3): mac.w pairs into ACC0 and ACC1, drained by paired movclr
+resampler_loop_b3 = 0x40001086; // type:code region:image // 3-byte-stride variant loop (idx 0): addq #3 cursors, clr.b, mac.l
+resampler_loop_l = 0x400010b6; // type:code region:image // packed-long variant loop (idx 1): swap/lsl unpack then mac.l with-load
+record_builder = 0x40004bd4; // type:func region:image // computes record words 27..31 for all eight tracks (one jsr caller; reads pingpong_cur); contains master_flags_site
+master_flags_site = 0x40004d8c; // type:code region:image // inside record_builder: forces track-8 master flags (wire 0x0640) from master_track (0x40004d8c-0x40004daa)
+state_isr = 0x40004840; // type:func region:image // the eDMA transfer-state ISR (channels 0/1/7 share it): first act acks ch0 via EDMA_CINT; then dispatches on edma_seq_counter through state_jump_table with NO bounds check (movel 0x46104d3e,%d0; lea 0x400ab61a,%a0; moveal %a0@(0,%d0:l:4),%a0; jmp %a0@). State bodies are 0x40004862, 0x400048da, 0x4000495c, 0x400049ca, 0x40004a38, 0x40004aaa, 0x40004b36, 0x40004bc0. ☠ A counter that gets ahead of frame_isr's clear (0x4000ac32) indexes past the table into an unrelated ramp table and jumps to garbage — the EXCEPTION screen with an address in the audio path. Any new code in the audio ISR can cause it; src/board/ot-board.c reports it as EDMA STATE OVERFLOW at the SSRT write
+staging_builder = 0x40004db8; // type:func region:image // builds per-track control slot words [CUE-LEV, LEVEL, scene, 0]; branches on cue_studio_mode (NORMAL arm 0x40004e4e, STUDIO arm 0x40004dd4)
+frame_isr = 0x4000aad0; // type:func region:image // THE audio frame ISR, one call per 16-frame block: full-regfile prologue, single rte at 0x4000d9ae; contains the apply, the publishers, the control-block builder and the measured arm/reset at 0x4000ac12/0x4000ac32 (☠ 0x4000aac8 is NOT the boundary — the prior function's rts is at 0x4000aac6)
+ctl_block_builder = 0x4000d2a0; // type:func region:image // inside frame_isr: builds control words 0x30-0x33 (metronome flag/pitch/CUE vol/MAIN vol), then clears the click byte
+metronome_click_encode = 0x4000b292; // type:func region:image // turns the beat event word at 0x46c80350 into the click byte at 0x46104d14 (0x10|frame, 0x30|frame accented)
+
+# ---- machine-kind system / master routing ----
+playback_stager = 0x40004008; // type:func region:image // machine vtable A[0/1/4]: STATIC/FLEX/PICKUP playback control stager
+neighbor_stager = 0x4000466c; // type:func region:image // machine vtable A[3]: NEIGHBOR readback copier from readback_buf + sel*1024 + trk*128
+master_prep = 0x400047d0; // type:func region:image // machine vtable B[6]: MASTER prep, a trivial marker
+silence_stager = 0x400047f0; // type:func size:0x4a region:image // machine vtable A[5/6/7]: the 74-byte empty/silence stager
+machine_apply = 0x4000b500; // type:func region:image // event-driven machine-id apply inside frame_isr; gated on track_dirty_bits; seeds real ids only under PLAY
+frame_irq_arm = 0x4000a840; // type:func region:image // sends host command 0x8b to the DSP and polls CVR — the frame-IRQ arm routine
+machine_publish = 0x4000c79c; // type:func region:image // steady-state machine-id publisher: copies the previous bank's byte forward
+master_publish = 0x4000b70e; // type:func region:image // master-mode publish engine, gated on master_track; queues [b,b',staged-kind,6] into track_change_records
+change_request_layer = 0x40005030; // type:func region:image // change-request layer; gated on seq_running, so the whole layer is play-gated
+master_mask_transform = 0x4007c428; // type:func region:image // master toggle's routing-mask transform: maintains only track 8's solo/mute bits, arms nothing
+
+# ---- boot, DSP bring-up, flash, hardware bring-up ----
+ssi_dead_init = 0x4001c258; // type:func region:image // a complete SSI pin-mux/bring-up for the ColdFire's own audio port — ZERO callers, dead code
+pad_drive_config = 0x4001f844; // type:func region:image // pad drive-strength and slew configuration (18 GPIO DSCR-region writes)
+dtim1_handler = 0x40055cb8; // type:func region:image // DTIM1 ISR: DTIM register block + the counter at 0x400c0cf0 (the 120 Hz reference match driving the 60 Hz system tick)
+codec_unmute_site = 0x40061b3a; // type:code region:image // the single dspi_xfer call in the codec path — the unmute instant
+sram_init = 0x4000f938; // type:func region:image // internal-SRAM initialiser, called at 0x40000512: copies the image at sram_init_src to 0x80000000, zeroes the rest
+rtc_bcd_to_bin = 0x4001c31c; // type:func region:image // BCD to binary, (x>>4)*10 + (x&15); applied to every DS1390 time/date field
+dspi_xfer = 0x4001c35c; // type:func region:image // polled, mutex-protected DSPI transaction on PCS0 (codec/RTC); 63 DSPI register references in its body
+pit2_delay = 0x400311b8; // type:func region:image // out-of-line polled delay on PIT2: writes PCSR2 0x533, PMR2, spins — no vector, no ICR
+dspi_init = 0x400e0c3e; // type:func region:image // the DSPI bring-up: CTAR0, CTAR1, MCR, PAR_DSPI
+dsp_record_loader = 0x40001b18; // type:func region:image // walks the self-describing DSP payload pushing it word by word; type-3 chunks skip a 6-byte header — the two headers the upload stream omits
+dsp_bootstrap_feed = 0x40001d4c; // type:func region:image // HDI24 ROM-bootstrap feeder bootstrap_load(src, byte_len, dest); drives the port register block at 0x20000000
+dsp_boot = 0x40001e50; // type:func region:image // the whole DSP bring-up, called exactly once from 0x4000050c: clears dsp_core_select, ICR 0x81 to the port, loads both cores
+dead_bss_clear = 0x4000f97c; // type:func region:image // standalone copy of the inline BSS clear, identical bounds (sdram_bss_start..sdram_bss_end), ZERO callers
+bootloader_selfupdate = 0x4000f9b4; // type:func region:image // MAIN OS reflashes the embedded bootloader (references bootloader_erase/program and the stamp five times)
+flash_erase = 0x40020628; // type:func region:image // OS-region sector erase; called by flasher
+bootloader_erase = 0x40020680; // type:func region:image // NOR sector erase, JEDEC: reset F0, AA/55/80/AA/55 (unlock 0xAAAA/0x5554), then 0x30 to the sector — IPL7-masked
+bootloader_program = 0x400206b4; // type:func region:image // NOR single-word program: AA/55/A0, write, data-poll; IPL7-masked
+flash_page_program = 0x400206f4; // type:func region:image // 256-byte page program, the OS-update writer; called by flasher
+flasher = 0x4007fb84; // type:func region:image // the flash writer: erase by sector (flash_erase), program by page (flash_page_program), read back and verify
+
+# ---- sequencer ----
+track_state_rec_get = 0x40000e50; // type:func region:image // per-track 168-byte state record accessor (base 0x46104e0e, 8 tracks); the trig resolver's first call
+seq_trig_state_resolver = 0x40097168; // type:func region:image // track -> state class 0..5 from three record bytes, with the mute byte at 0x8000184a folded in (btst per track forces byte 0 to 0)
+seq_trig_voice_bridge = 0x400977cc; // type:func region:image // (track, cmd, live) -> voice command word based 0x7000; calls the resolver first
+seq_step_reader = 0x4009d1e8; // type:func region:image // read_step(track, bank, pattern, step, slot): bank blob base 0x400e21e0 stride 0x9b340 (the same pair pd_bank_to_live uses), pattern stride 0x8ed8 (16 x 0x8ed8 = the bank copy's first segment), trailer at +0x8e56; slot -1 substitutes the buffer at 0x46c7aa24
+seq_cond_evaluator = 0x400a5164; // type:func region:image // eval_cond(track, step, condition, force_cycle_zero) -> 0 = play: condition 0 fast-path, cycle count from seq_cond_counters[track] (zeroed when forced), clamp to 63, per-condition jump table at 0x400a51a4
+seq_cond_caller_audio = 0x4009d34e; // type:code region:image // the audio-track evaluator call site: nonzero return suppresses the trig; per-track step addressing stride 0x91a
+seq_cond_caller_midi = 0x4009d030; // type:code region:image // the MIDI-track evaluator call site
+seq_length_compare = 0x400a3d7a; // type:code region:image // per-track byte test choosing which length bounds a track's step counter (NORMAL vs PER TRACK)
+seq_pattern_commit = 0x400a44a0; // type:code region:image // where a pending pattern becomes current: copies 0x800065be->0x800065c1 and 0x800065bd->0x800065c2 — the pattern-change quantisation point
+seq_pattern_validator = 0x4009a846; // type:func region:image // pattern-data sanitiser: clamps per-step fields and counts repairs
+seq_trailer_validator = 0x4009aa4a; // type:func region:image // the pattern-trailer validator; returns a repair count
+seq_trailer_init = 0x4009abdc; // type:func region:image // the pattern-trailer initialiser (the source of the trailer defaults)
+seq_micro_window = 0x4002d338; // type:func region:image // opens the MICRO TIMING window — pea 0x68/pea 0x37 = the claimed 104x55 — and stores its selector argument into seq_micro_edit_context; handle at 0x460d1014
+seq_isr = 0x400a1e0c; // type:func region:image // the sequencer step engine, a software-forced interrupt (INTFRC through the always-masked source 32): masks IPL7, full-regfile prologue, rte at 0x400a4f16
+seq_tempo_publish = 0x4009c550; // type:func region:image // publish_tempo(): copies project or per-pattern tempo into 0x80001814/0x80001818 under IPL 7
+seq_tempo_set_raw = 0x4009c708; // type:func region:image // set_tempo(raw): clamps to 720..7200 (constants in body), writes project or pattern tempo, republishes
+
+seq_voice_cmd_emitter = 0x40005178; // type:func region:image // emit_voice_command(track, cmd, live): the live path is gated on seq_running == 1 and the byte at 0x80000003
+seq_selection_clamp = 0x4000fda8; // type:func region:image // validates the whole current-selection block (26 references to 0x100b14cc..d3) — the source of every index range
+seq_start = 0x4009b964; // type:func region:image // START/CONTINUE: dispatches on seq_running (read in body)
+bank_reload_gate_read = 0x4009b5c0; // type:func region:image // movel bank_reload_gate,%d0; rts — the 32-bit gate accessor (confirms the gate's width); play_button calls it first
+play_button = 0x40061778; // type:func region:image // PLAY handler: first act calls bank_reload_gate_read; a zero gate posts the literal WAIT string at 0x400b68c2
+seq_clock_reset = 0x4009c3fa; // type:code region:image // transport-start phase reset: nine references to the seq phase block (0x46107568..74)
+seq_tempo_set_bpm = 0x4009c7c4; // type:func region:image // set_tempo(integer_bpm, tenths): remsl #10 on the fraction then combine — the UI entry to the 720..7200 raw scale
+seq_recip_site = 0x4000ac92; // type:code region:image // remsl of 0x80000000 by [a2] inside frame_isr — the tempo reciprocal site
+seq_split_calc = 0x4000aef4; // type:code region:image // the msacl EMAC loop inside frame_isr turning pending event phases into sample offsets (dual accumulators)
+ap_echo = 0x400031a0; // type:func region:image // a CPU-side EMAC audio effect: saves MACSR and both ACCext pairs on entry, clears MACSR — the ECHO FREEZE DELAY render
+ap_prep_return_or = 0x4000d49e; // type:code region:image // inside frame_isr, the machine-side write channel into the record: indexes (pingpong<<3 + track)<<6 — the (sel*8+track) x 64-byte record array — and ORs into it
+ap_hreq_wild_dispatch = 0x4000d022; // type:code region:image // the indexed store the frame ISR dispatches through when HREQ delivery is forced
+ap_record_stager = 0x4000cb2a; // type:code region:image // inside frame_isr: the interleaved moveml loop copying record words 0..26 out of the two per-track sources (24-byte + 12-byte groups)
+ap_record_readback = 0x4000d12c; // type:code region:image // inside frame_isr: snapshots part of the finished record for the CPU-side recorder, gated per track by a shift-out mask bit
+cmd_ack_poll = 0x4000ab26; // type:code region:image // frame_isr's second act: polls CVR (0x20000004) bit 7 until the DSP takes the command, then sets ap_reentry_guard
+audio_start_unmask = 0x4000a918; // type:code region:image // the second site that unmasks the frame IRQ (CIMR write in body)
+frame_irq_boot_arm = 0x4001fc38; // type:code region:image // inside the boot task, just before idle_loop: the frame IRQ is armed during ordinary init, not by user action
+
+# ---- panel link / display (ColdFire side) ----
+panel_rx_handler = 0x40092254; // type:func region:image // per-byte UART1 receive callback, registered with the UART setup (0x40010efc) alongside the 312500 baud constant
+panel_rx_parser = 0x4009228c; // type:func region:image // the deferred frame parser; contains the measured bad-class CLEAR-not-resync at 0x40092350 that wedges body mode
+panel_xfader_setter = 0x40092fac; // type:func region:image // crossfader_set(0..127): dedups against 0x400d16cc, emits a type-4 UI event
+font_ui_main = 0x400ba876; // type:data region:image // font descriptor 5 (20-byte stride from font_table, same stride src/ocr.c ships); full 8-bit width/offset tables
+screen_canvas = 0x400bf10a; // type:data region:image // the main screen canvas struct; 262 references, the most-referenced canvas in the image
+panel_front_ptr = 0x400b970c; // type:data region:image // front (last-sent) framebuffer pointer; image initial value = hw_framebuffer_a
+panel_back_ptr = 0x400b9710; // type:data region:image // back (composite target) framebuffer pointer; image initial value = hw_framebuffer_b
+
+# ---- project data ----
+pd_live_to_bank = 0x4000fbb4; // type:func region:image // store_live_to_bank(bank): the mirror of pd_bank_to_live (sources the literal pd_live_bank_base)
+pd_part_save = 0x4004a908; // type:func region:image // save_part(n): copies working->saved in blob and live image, sets the saved flag (references the live part flag/name block)
+pd_part_clear = 0x4004a9d0; // type:func region:image // clear_part(n): initialises both working and saved records, clears the flags, renames
+pd_part_reload = 0x4004aab4; // type:func region:image // reload_part(n): no-op unless the saved-exists flag is set (reads the live flags)
+pd_bank_serialiser = 0x4008b278; // type:func region:image // write_bank(handle, blob): walks pd_bank_file_tag_table — the authoritative bank-blob layout
+pd_bank_deserialiser = 0x4008ded0; // type:func region:image // read_bank(handle, blob): validates tag by tag against the same table
+par_apply_part = 0x40009848; // type:func region:image // apply_part(part, pattern): writes the publish byte at 0x80001828; the publisher entry
+pd_part_init = 0x40005638; // type:func region:image // init_part(record): writes every default block by block from the parameter-descriptor table (reads the descriptor base)
+seq_midi_realtime = 0x400108b0; // type:func region:image // sends one MIDI real-time byte out UART0 (three UART0 register refs); the seq ISR's 0xF8 clock path
+par_param_flags = 0x400323b8; // type:func region:image // param_flags(P,i) -> the enable nibble — EXCEPT i==6 returns literal 1 (moveq #6/cmp/moveq #1/rts, then the decode helper at P+394/398, & 0xF)
+par_param_enabled = 0x400323e8; // type:func region:image // param_enabled(P,i) -> nibble & 1, no special case (the sibling entry right after par_param_flags)
+par_enable_decode_helper = 0x400a6994; // type:func region:image // the nibble-decode helper both accessors call with the two table pointers at P+394/398
+fs_project_path_builder = 0x40025230; // type:func region:image // builds '<set base>/<project name>': null args default to the NVRAM strings nv_set_base_path and nv_cur_project_name (read from the fixture: '/Set 260819', 'PROJECT 260819')
+par_stager = 0x400326d4; // type:func region:image // stage(P, page, rows): walks a caller-supplied row list; early-out on a null page
+par_id_store = 0x40052474; // type:func region:image // stores the chosen effect id from the chooser: literally indexes par_chooser_fx2 by the cursor at par_chooser_cursor
+par_resolver = 0x40031da4; // type:func region:image // resolve(track, page_kind) -> parameter descriptor: reads par_table_machine/fx1/fx2 in the body
+par_chooser_init = 0x4005996c; // type:func region:image // seeds the chooser cursor from par_table_id_to_cursor after counting the list by its terminator
+par_handler_class_b = 0x400328e4; // type:func region:image // per-parameter value handler indexing 0x46c7d8ee at (slot+56)*24
+pd_bank_to_live = 0x4000faf0; // type:func region:image // load_bank_to_live(bank): copies the bank blob (stride 0x9b340, size 0x8ed80) into the live image — first copy dest is the literal pd_live_bank_base
+pd_memcpy = 0x40020898; // type:func region:image // memcpy(dst, src, n), the primitive every blob/live/part copy goes through
+
+# ---- UI / project parsing ----
+metronome_toggle = 0x40062d58; // type:func region:image // FUNC+MIX handler: flips metronome_enable and mirrors it to NVRAM nv_metro_enable
+proj_parse_master_track = 0x400872c4; // type:func region:image // project.work parser: MASTER_TRACK -> master_track
+proj_parse_cue_studio = 0x40087306; // type:func region:image // project.work parser: CUE_STUDIO_MODE -> cue_studio_mode
+proj_parse_track_cue_mask = 0x40087fd4; // type:func region:image // project.work parser: TRACK_CUE_MASK -> routing_mask << 16 (the cue plane)
+
+# ---- ATA + filesystem ----
+fs_backend_select = 0x4001451c; // type:func region:image // binds the FAT backend (arg!=0) or the in-image archive backend into the 21-slot fs vtable at 0x46c824xx (41 refs)
+fs_backend_null = 0x4001474c; // type:func region:image // binds the null backend: consecutive stubs (0x40014878..) into the same vtable
+ata_issue = 0x40014848; // type:func region:image // ATA command issue; IPL7-protects only the command write, push loop and counter decrement run at task IPL
+ata_pinmux = 0x40014960; // type:func region:image // ATA/UART pin mux on/off (18 PAR/GPIO writes); one of k_level7_panic's two calls — the panic parks the pins
+ata_dispatch = 0x40015098; // type:func region:image // ATA worker dispatcher: busy lock, dequeue one 22-byte record, switch on opcode
+ata_dma_isr = 0x400152a4; // type:func region:image // eDMA ch14 major-loop ISR: first act writes 14 to EDMA_CINT; the sector-progress notifier (unused on the PIO-only path)
+ata_isr = 0x40015304; // type:func region:image // the ATA ISR: contains the measured 4x-unrolled PIO loops (0x4001546c read, 0x40015536 write) and the DRQ spin at 0x4001551e; HALTs on BSY/ERR
+ata_identify_request = 0x400159bc; // type:func region:image // issues IDENTIFY (0xEC) and blocks until the ISR completes it
+ata_hw_init = 0x40015fd8; // type:func region:image // controller bring-up: 21 writes to the 0x900000xx timing/control block; asserts or releases resets by arg
+ata_dma_progress_enable = 0x400160a8; // type:func region:image // arms/disarms the per-sector progress interrupt via TCD14.CSR (0xfc0451de)
+ata_subsystem_init = 0x400160f8; // type:func region:image // one-shot storage init (pin direction, mux off, identify buffer, ISR install — install site not located, no absolute ref)
+fs_copy_file = 0x40016388; // type:func region:image // buffered copy in 64 KiB chunks, size rounded up to a sector
+fs_mount = 0x400168e8; // type:func region:image // reads LBA 0, accepts a bare FAT32 BPB or an MBR whose first partition is type 04/06/0B/0C/0E (the type compares are in the body)
+fs_open = 0x4001b570; // type:func region:image // fs_open(path, mode): takes the volume mutex (k_mutex_lock), resolves the path, allocates a handle
+fs_usb_msc_task = 0x4001ee30; // type:func region:image // USB mass-storage worker: blocks on its queue, switches on message types 1..7 (priority 5, queue 0x460bb3a0). ☠ 0x4001ee42 is 0x12 into the prologue, not the entry
+fs_card_detect_poll = 0x4003f174; // type:func region:image // the only place card presence becomes an event; polls PPDSDR_UART (0xfc0a4039); card presence is bit 3
+fs_bank_strd_to_work = 0x4008f0b0; // type:func region:image // for each bit in a 16-bit mask, copies bankNN.strd to bankNN.work (9 fs_copy_file calls)
+ata_udma_timing_table = 0x400abc5f; // type:data region:image // UDMA timing bytes, 11 per mode; exactly 6 modes before the MDMA table
+ata_mdma_timing_table = 0x400abca1; // type:data region:image // multiword-DMA timing bytes, 4 per mode: TIME_M, JN, D, K
+
+# ---- tables in the image ----
+fx_desc_table = 0x400d4618; // type:data size:0x1920 region:image // 16 FX parameter descriptors x 0x192 bytes, P-canonical base (the pointer the id tables store): 4-byte header, short name at +4, long name, 6-byte parameter labels; entry 0 is NONE (☠ 0x400d461c is the NAME field, not the entry)
+boot_mode_var = 0x400b9650; // type:data region:image // where MAIN OS caches the bootloader's boot-mode argument — its very first act (0x4000040c)
+k_vector_table_ptr = 0x400b9668; // type:data region:image // image word holding 0x40000000, loaded into VBR at 0x40000db0; the vector table (and low RAM) live at 0
+rtc_weekday_table = 0x400b77f6; // type:data region:image // the weekday name table, MONDAY..: fixes the DS1390 day-register numbering
+font_table = 0x400ba812; // type:data region:image // the eight panel fonts; OCR template source (O/0 and S/5 draw identically)
+par_table_machine = 0x400d5f38; // type:data size:0x20 region:image // machine id -> parameter descriptor, 8 entries: ids 0-6 share the PB page, id 7 (transition mute) is null
+par_table_fx1 = 0x400d5f58; // type:data region:image // FX1 effect id -> descriptor, 32 entries + null; ids 20/21/22 (reverbs) and 8 (DELAY) point at NONE — the measured FX1 restriction
+par_table_fx2 = 0x400d5fdc; // type:data region:image // FX2 effect id -> descriptor: 4=FLTR, 8=DEL, 17=FLNG, 20/21/22=PLTE/SPRG/DARK — the same ids measured in the DSP dispatch tables
+par_chooser_fx1 = 0x400d6060; // type:data region:image // FX1 chooser list, menu order, null-terminated: 11 entries, NONE..LO-FI
+par_chooser_fx2 = 0x400d6090; // type:data region:image // FX2 chooser list: 15 entries, byte-exact the measured UI order NONE..DARK REV
+pd_bank_file_tag_table = 0x400d1670; // type:data region:image // the bank file-format tag table; referenced by both the serialiser and deserialiser
+par_table_id_to_cursor = 0x400d6150; // type:data region:image // effect id -> chooser cursor position (the reverse of the chooser order); read by par_chooser_init
+per_track_stager_a = 0x400d61d0; // type:data region:image // per-track installed stream-stager pointers, bank A; filled from machine_vtable_a[id&7]
+per_track_stager_b = 0x400d61f0; // type:data region:image // per-track installed stream-stager pointers, bank B
+machine_vtable_a = 0x400d6434; // type:data size:0x20 region:image // machine vtable A[id&7]: stream stagers (A[3]=neighbor_stager, A[0/1/4]=playback_stager, A[5/6/7]=silence_stager)
+machine_vtable_b = 0x400d6454; // type:data size:0x20 region:image // machine vtable B[id&7]: NULL-checked prep (B[6]=master_prep)
+
+img_zero_run = 0x400d64da; // type:data size:0x1762 region:image // 5986 zero bytes in the image (measured, ends 0x400d7c3c) — but ALSO the base of indexed reads at 0x40001732, so NOT established free space; measure at runtime before using it
+flash_sector_table = 0x400a95c0; // type:data region:image // the OS region's 37-entry flash sector boundary table: 4000 6000 8000 a000 c000 e000 10000 20000 ...
+bootloader_stamp = 0x400dea48; // type:data region:image // embedded bootloader's version stamp: 0x0408 — the same value the boot contract checks at 0x3ffc — followed by its reset SP 0x80008000 (top of internal SRAM)
+bootloader_end = 0x400e1ec4; // type:data region:image // one past the embedded bootloader; +796 bytes lands exactly on dsp_bootstrap_a
+dsp_bootstrap_a = 0x400e21e0; // type:data region:image // core A's first-stage scatter loader blob
+dsp_bootstrap_b = 0x400e2276; // type:data region:image // core B's first-stage scatter loader blob (150 bytes = 50 DSP words after core A's)
+dsp_payload_a = 0x400e2324; // type:data size:0x136cb region:image // the self-describing DSP payload for core A (the codec core, ROM boot 0x31000); starts with the type-3 6-byte header; src/dsp-main.cc boots from exactly here
+dsp_payload_b = 0x400f59ef; // type:data region:image // core B's payload (the voice/FX core), immediately after payload A
+sram_init_src = 0x401086f4; // type:data region:image // initialised-data image for the internal SRAM, copied by sram_init; runs exactly to the image's last byte (+0x76fc)
+
+# ---- low RAM ----
+vector_table = 0x40000000; // type:data size:0x400 region:sdram // the exception vector table (VBR = 0x40000000, loaded from k_vector_table_ptr); k_default_exception_handler filled into all 256 slots at init
+bootstrap_stamp = 0x00003ffc; // type:data region:lowram // bootstrap version stamp; 0x0408 takes the fast path into the DSP upload
+
+# ---- internal SRAM (0x80000000, scheduler + audio working set) ----
+routing_mask = 0x80000008; // type:data region:sram // live 24-bit routing mask: bits 0-7 SOLO, 8-15 MUTE, 16-23 CUE; staging reads it per block; NVRAM mirror nv_routing_mask
+master_track = 0x80000034; // type:data region:sram // MASTER_TRACK project byte; forces machine id 6 on track 8 and the 0x0640 record flags
+main_level = 0x80000035; // type:data region:sram // MAIN_LEVEL project setting; reaches control word 0x29
+cue_level = 0x80000036; // type:data region:sram // CUE_LEVEL project setting; reaches control word 0x28
+cue_studio_mode = 0x80000037; // type:data region:sram // CUE_STUDIO_MODE byte (CUE CFG NORMAL/STUDIO); the firmware's real master-routing switch
+metronome_cue_vol = 0x8000005e; // type:data region:sram // METRONOME CUE volume (stock 32); the labelled probe that pinned CUE = TX 3/4
+metronome_main_vol = 0x8000005f; // type:data region:sram // METRONOME MAIN volume (stock 0); the labelled probe that pinned MAIN = TX 1/2
+metronome_enable = 0x80000060; // type:data region:sram // metronome on/off; flipped by metronome_toggle
+metronome_pitch = 0x80000061; // type:data region:sram // metronome pitch; equal-tempered (increment doubles per 12)
+metronome_tonal = 0x80000062; // type:data region:sram // metronome TONAL setting; bit 6 of control word 0x30
+cue_mutes_trk = 0x8000009c; // type:data region:sram // CUE_MUTES_TRK setting; NORMAL-mode staging ORs the cue plane onto the mute plane when set
+pingpong_cur = 0x800000e0; // type:data region:sram // current ping-pong bank select; writes use cur
+pingpong_prev = 0x800000e4; // type:data region:sram // previous bank select; reads use prev (pipeline is one block deep)
+cur_block_copy = 0x800000ec; // type:data region:sram // copy of cur_block_ptr, written at 0x4000d988
+track_records = 0x80000110; // type:data region:sram // track records x16: two PINGPONG halves (0x110 and 0x310) x 8 tracks x 64 bytes, the (pingpong<<3+track)<<6 array ap_prep_return_or indexes; each block DMAs tracks 0-3 of both halves to DSP core 1 and tracks 4-7 to core 0 (all 16 saddrs measured in the .wire captures); one-block strobe values in word 30 land in whichever half is being written that block
+published_machine_ids = 0x80000eb4; // type:data region:sram // published per-track machine ids, + sel*8 + trk; power-on 0xff (&7 = transition mute) until first PLAY
+published_fx_ids = 0x80000ec4; // type:data region:sram // published per-track FX ids
+track_dual_levels = 0x80000c60; // type:data region:sram // per-track [LEVEL, CUE-LEV] u16 pair, + t*4; staging_builder's first cursor
+track_scene_levels = 0x80000c80; // type:data region:sram // per-track scene/crossfader level, + t*2 — a volume-curve INDEX (curve[0] == 0); control word w2
+staging_cursor = 0x80001c80; // type:data region:sram // stream staging write cursor
+stream_staging_a = 0x80001c90; // type:data region:sram // stream staging buffer A; the audio ping-pongs between this and stream_staging_b on stream-arm transfer index 4
+stream_staging_b = 0x80002710; // type:data region:sram // stream staging buffer B
+state_jump_table = 0x400ab61a; // type:data size:0x20 region:image // state_isr's dispatch table: EXACTLY 8 longword entries (states 0-7), immediately followed by an unrelated fixed-point ramp table (0x00000000, 0x000f23fa, 0x001e47f4, ...) which is what an over-range index reads as a jump target
+readback_buf = 0x80003190; // type:data size:0x800 region:sram // post-FX readback, 2 banks x 8 tracks x 128 B; the sum arm echoes these same buffers back
+cur_block_ptr = 0x80003c10; // type:data region:sram // pointer to the current wire block; frame ISR computes it from wire_ring_widx
+fader_levels = 0x80003c60; // type:data region:sram // crossfader level tables; zero until the panel reports a position
+wire_ring_widx = 0x80004800; // type:data region:sram // wire-block ring write index, advanced at the tail of the frame ISR (0x4000d98e)
+wire_ring_ridx = 0x80004804; // type:data region:sram // wire-block ring read index, advanced at 0x4000382c; control-transfer SADDR comes from it
+slot_cursors = 0x8000485a; // type:data region:sram // per-track cursor table + t*8 (staging_builder's third cursor; +2 holds the level, single writer 0x40004e8c)
+wire_ring = 0x80005460; // type:data size:0x200 region:sram // 4-deep ring of 128-byte control blocks (struct ot_ctl_block)
+voice_scratch = 0x800062ac; // type:data region:sram // (phase,count) pair scratch filled by voice_routine
+seq_running = 0x800065b8; // type:data region:sram // sequencer running: 0 stopped, 1 under PLAY (set at 0x4009c3d4 beside the beat-event write)
+ready_queue = 0x800068d8; // type:data region:sram // pointer to the highest non-empty ready-queue SLOT, not to a TCB — the ctx switch dereferences twice (queue -> slot -> TCB, 0x40000576/0x4000057c); shared with sem_post
+k_ready_heads = 0x800068dc; // type:data size:0x20 region:sram // per-priority ready-queue head array, 8 slots of 4; kernel init clears exactly 0x800068dc..0x800068fc
+k_a0_spill = 0x80006900; // type:data region:sram // one-longword %a0 spill in pit0_ctx_switch (0x40000554) before the TCB is reachable; fixed up into regs[8] at 0x40000572
+current_task = 0x800068fc; // type:data region:sram // pointer to the CURRENT task control block (struct ot_tcb)
+
+# ---- SDRAM working set ----
+sdram_bss_start = 0x46025de0; // type:data region:sdram // first address of the SDRAM BSS clear (inline at boot 0x40000518, and the dead standalone copy)
+sdram_bss_end = 0x4763d580; // type:data region:sdram // one past the BSS clear; both clears use exactly these bounds (the constant appears exactly twice)
+hw_framebuffer_a = 0x46c85472; // type:data region:sdram // hardware framebuffer A (initial front pointer, read from the image word at panel_front_ptr)
+hw_framebuffer_b = 0x46c85872; // type:data region:sdram // hardware framebuffer B (initial back pointer)
+seq_mute_byte = 0x8000184a; // type:data region:sram // the per-track mute bits the trig resolver folds in (btst by track index)
+seq_pending_pair = 0x800065bd; // type:data size:0x2 region:sram // the pending (bank, pattern) byte pair seq_goto_pattern writes; committed by seq_pattern_commit
+seq_current_pair = 0x800065c1; // type:data size:0x2 region:sram // the current pair, written only by seq_pattern_commit (65be->65c1, 65bd->65c2)
+seq_micro_edit_context = 0x460d1018; // type:data region:sdram // which trig array the MICRO TIMING window edits; written by seq_micro_window from its argument
+seq_phase_accum = 0x46104cf4; // type:data region:sdram // the master phase accumulator (large accumulated value)
+seq_midi_tick_target = 0x46107568; // type:data region:sdram // phase countdown to the next MIDI clock tick
+seq_micro_tick_target = 0x4610756c; // type:data region:sdram // phase countdown to the next microtiming tick
+seq_phase_countdown = 0x46107570; // type:data region:sdram // phase remaining to the next sequencer tick; non-positive forces the seq ISR
+seq_phase_remainder = 0x46107574; // type:data region:sdram // the overshoot carried across a tick (under PLAY: negative and moving) — what makes the clock drift-free
+seq_cond_counters = 0x46107918; // type:data size:0x40 region:sdram // 16 x u32 pattern-repetition counters (audio 0-7, MIDI 8-15) — the A:B condition cycle counts; on a running Octatrack incrementing once per pattern cycle in lockstep under PLAY, cleared on STOP
+ap_reentry_guard = 0x46104d4e; // type:data region:sdram // frame-ISR re-entrancy guard: set to 1 right after cmd_ack_poll near entry (0x4000ab32); ☠ a mid-ISR RSP sample reads 1 — not evidence of a stuck guard
+metro_click_byte = 0x46104d14; // type:data region:sdram // click byte 0x10|frame (0x30|frame accented); cleared by ctl_block_builder after staging
+staged_kinds = 0x46104d15; // type:data region:sdram // staged machine kinds
+edma_seq_counter = 0x46104d3e; // type:data region:sdram // transfer-state counter: every DSP transfer state increments it (0x400049c0, 0x40004a2e), frame ISR clears it at 0x4000ac32; the eDMA completion gate polls it
+k_exception_hook_ptr = 0x460ba970; // type:data region:sdram // function pointer the default exception handler calls with the faulting SP; 0 = ignore
+k_exception_hook_sp = 0x460ba974; // type:data region:sdram // where the default exception handler saves the SP at exception time (0x40000d78)
+ui_queue = 0x460d17ae; // type:data region:sdram // the first of the three main message queues (the UI event queue): mask 0x3ff, buffer and write index live at the exact +16/+20/+24 offsets k_queue_post's code uses; both built input maps embed this address as their post target
+par_chooser_cursor = 0x460d5ca8; // type:data region:sdram // the FX chooser cursor par_id_store indexes the chooser list with
+pd_bank_file_checksum = 0x460fab5c; // type:data size:0x2 region:sdram // the u16 additive bank-file checksum accumulator, read-modify-written through the file I/O helpers at 0x40085d92..; the trailing 2-byte checksum measured on bank01.work
+panel_map_a = 0x460ffe0c; // type:data region:sdram // built input map A; alternates with panel_map_b so the parser never reads a half-rebuilt table (structurally identical, both pointing at ui_queue)
+panel_map_b = 0x4610048c; // type:data region:sdram // built input map B
+panel_key_state = 0x46100b18; // type:data size:0x8 region:sdram // debounced key-group state bytes: 00..20..00 (group 5 bit 5) while FUNC and all zero after release
+panel_rx_ring = 0x46100b28; // type:data size:0x20 region:sdram // 32-byte raw inbound panel byte ring; carries 40 00 pairs on a running Octatrack — the crossfader heartbeat frames
+panel_version_buf = 0x46100b48; // type:data region:sdram // the class-0x70 version body; on a running Octatrack = 05 08 01 02 0*5, byte-identical to ot-panel-uart.c's reply; 0x46100b52 holds a pointer to it once one arrived (it does)
+swtimer_expiry_bitmap = 0x460ba9ae; // type:data region:sdram // software-timer expiry bitmap
+swtimer_lock = 0x460ba9c0; // type:data region:sdram // software-timer sweep lock
+swtimer_counters = 0x460ba9cc; // type:data region:sdram // counter table for the 136 software timers
+k_scratch_tcb = 0x46c7ae30; // type:data region:sdram // bootstrap TCB, seeded as the first current_task (0x40000de0) so the first context save has somewhere to land; never runs
+k_boot_tcb = 0x46c7ae84; // type:data region:sdram // the boot/idle task's TCB, registered first at kernel init (0x40000e34)
+bank_reload_gate = 0x46c77bf6; // type:data region:sdram // PLAY refused with a WAIT modal while zero; WIDER than a byte — reads as u32 = 0x100 with the low bytes 0 on a booted, play-ready Octatrack, so test the full word, not byte 0
+swtimer_sem = 0x46c7e0e2; // type:data region:sdram // counting semaphore swtimer_task blocks on
+track_change_records = 0x46c7fe00; // type:data size:0x20 region:sdram // per-track 4-byte change records (track 8 = +0x1c); consumer is the apply compare loop 0x4000bd04-46
+track_change_pending = 0x46c7feb4; // type:data region:sdram // per-track pending bitmask (bit 7 = track 8)
+metro_beat_event = 0x46c80350; // type:data region:sdram // beat event word: 3 accented bar start, 1 beat; gated on metronome_enable
+track_dirty_bits = 0x46c80354; // type:data region:sdram // per-track dirty bits gating machine_apply
+ata_sector_counter = 0x46c8c592; // type:data region:sdram // guest-side per-command sector counter; the ATA model holds write-completion INTRQ until it matches
+
+# ---- battery-backed CS1 SRAM (NVRAM) ----
+pd_live_bank_base = 0x1001614e; // type:data region:nvram // base of the live single-bank image; verified as pd_bank_to_live's first copy destination
+part_names_live = 0x100b1463; // type:data size:0x1c region:nvram // the four live part names, 7 bytes each; e.g. ONE TWO THREE FOUR
+part_dirty_live = 0x100b145e; // type:data region:nvram // live part-dirty bitmask, one byte (read 0x01 on the stock fixture)
+part_saved_flags_live = 0x100b145f; // type:data size:0x4 region:nvram // live per-part saved flags; adjacency with part_names_live read back exactly
+cur_track = 0x100b14cc; // type:data region:nvram // current audio track index 0..7 (live 0 = track 1 on the stock fixture)
+cur_bank = 0x100b14ce; // type:data region:nvram // UI-selected bank 0..15
+cur_part = 0x100b14cf; // type:data region:nvram // current part index 0..3
+cur_pattern = 0x100b14d0; // type:data region:nvram // current pattern index 0..15
+nv_cur_project_name = 0x100f8378; // type:data region:nvram // the current project name string (fixture: PROJECT 260819); fs_project_path_builder's null-name default
+nv_set_base_path = 0x100f8480; // type:data region:nvram // the set base path string (fixture: /Set 260819)
+nv_main_level = 0x100b1495; // type:data region:nvram // NVRAM mirror of main_level
+nv_cue_level = 0x100b1496; // type:data region:nvram // NVRAM mirror of cue_level
+nv_cue_studio_mode = 0x100b1497; // type:data region:nvram // NVRAM mirror of cue_studio_mode
+nv_metro_cue_vol = 0x100b14be; // type:data region:nvram // NVRAM mirror of metronome_cue_vol
+nv_metro_main_vol = 0x100b14bf; // type:data region:nvram // NVRAM mirror of metronome_main_vol
+nv_metro_enable = 0x100b14c0; // type:data region:nvram // NVRAM mirror of metronome_enable
+nv_metro_pitch = 0x100b14c1; // type:data region:nvram // NVRAM mirror of metronome_pitch
+nv_metro_tonal = 0x100b14c2; // type:data region:nvram // NVRAM mirror of metronome_tonal
+nv_routing_mask = 0x100b14d4; // type:data region:nvram // NVRAM mirror of routing_mask
+
+# ---- IO ----
+hdi24_base = 0x20000000; // type:io // the HDI24 host-port bridge: +0x00 arm/ICR, +0x04 CVR (host command, guest polls bit 7), +0x1c the data port — the roles ot-dsp-port.c implements
+hdi24_data = 0x2000001c; // type:io // DSP HDI24 data port (window base 0x20000000)
+ata_time_base = 0x90000000; // type:io // TIME_OFF, first of the 24 timing registers (0x00..0x17): PIO at +0x02, MDMA at +0x09, UDMA at +0x0d
+ata_fifo_data32 = 0x90000018; // type:io // FIFO_DATA32 — the only ATA address the eDMA channels touch
+ata_cr = 0x90000024; // type:io // ATA_CR: FEN(7) RESET(6) FREFILL(5) FEMPTY(4) DMAPEND(3) DMAMODE(2) DMADIR(1) IORDYEN(0)
+ata_isr_reg = 0x90000028; // type:io // ATA_ISR (controller interrupt status), read-only
+ata_ier = 0x9000002c; // type:io // ATA_IER — interrupt/DMA-request enables
+ata_icr = 0x90000030; // type:io // ATA_ICR, W1C — the firmware ACKS INTRQ HERE (measured; register-relative writes, zero absolute refs — which is how a static pass misses it; dropping the write wedges the ISR at IPL 5)
+ata_data = 0x900000a0; // type:io // ATA data port; PIO loops at 0x4001546c (read) / 0x40015536 (write), 256 halfwords per sector at IPL 5
+ata_features = 0x900000a4; // type:io // DRIVE_FEATURES on write, error code on read
+ata_sector_count = 0x900000a8; // type:io // DRIVE_SECTOR_COUNT; 0 means 256
+ata_lba_low = 0x900000ac; // type:io // LBA[7:0]
+ata_lba_mid = 0x900000b0; // type:io // LBA[15:8]
+ata_lba_high = 0x900000b4; // type:io // LBA[23:16]
+ata_dev_head = 0x900000b8; // type:io // written 0xE0 | LBA[27:24]: LBA mode, device 0
+ata_status = 0x900000bc; // type:io // DRIVE_STATUS on read / DRIVE_COMMAND on write; the firmware never acks by reading it (measured)
+ata_alt_status = 0x900000d8; // type:io // DRIVE_ALT_STATUS: STATUS bits without the INTRQ clear
+edma_cr = 0xfc044000; // type:io // eDMA Control Register; the firmware clears it (clrl at 0x4000310a) — fixed-priority arbitration
+edma_serq = 0xfc044018; // type:io // EDMA_SERQ, 8-bit set-channel-enable
+edma_cerq = 0xfc044019; // type:io // EDMA_CERQ, clear-channel-enable
+edma_cint = 0xfc04401c; // type:io // EDMA_CINT; ata_dma_isr writes 14 here as its first instruction
+edma_ssrt = 0xfc04401e; // type:io // eDMA SSRT: every transfer state ends with a store here; SSRT-started completions raise synchronously
+edma_tcd_base = 0xfc045000; // type:io // eDMA TCD array, 32 bytes per channel (struct ot_edma_tcd); TCD0/1 CSR at +0x1e/+0x3e are the measured audio-chain arms
+tcd0_csr = 0xfc04501e; // type:io // eDMA TCD0.CSR; the state-7 sum guard reads its DONE bit at 0x40004b28
+tcd1_csr = 0xfc04503e; // type:io // eDMA TCD1.CSR; the frame ISR arms the MAJORELINK chain with 0x0621 at 0x4000ac12
+tcd14_ata_read = 0xfc0451c0; // type:io // TCD for the ATA receive channel (ch14); its CSR +0x1e is what ata_dma_progress_enable toggles
+tcd15_ata_write = 0xfc0451e0; // type:io // TCD for the ATA transmit channel (ch15)
+intc0_base = 0xfc048000; // type:io // INTC0, sources 0-63; matches OT_INTC0_BASE in src/board/ot-board.c
+intfrch0 = 0xfc048010; // type:io // INTFRCH0 — the frame ISR forces INTC0 source 32 here to run the sequencer ISR (11 refs; source stays IMR-masked forever, which is why patches/qemu/0005 makes INTFRC bypass IMR)
+intc0_simr = 0xfc04801c; // type:io // INTC0 Set Interrupt Mask; the frame ISR's fourth instruction masks its own source here (0x4000aada)
+intc0_cimr = 0xfc04801d; // type:io // INTC0 Clear Interrupt Mask; exactly one write from the state machine — state 7 re-arming the frame IRQ
+ata_intc0_icr22 = 0xfc048056; // type:io // INTC0 ICR for source 22 (the ATA DMA progress channel), +0x40+source
+intc1_base = 0xfc04c000; // type:io // INTC1, an independent second controller; INTFRCH1 at +0x10 is the kernel's forced-reschedule register (pit0_ctx_switch acks bit 11)
+ata_intc1_icr54 = 0xfc04c076; // type:io // INTC1 ICR for source 54 — the ATA interrupt, level 5 (matches OT_ATA_SRC in src/board/ot-board.c and the measured IPL-5 PIO loops)
+uart1_base = 0xfc064000; // type:io // UART1 — the panel link; k_exception_reporter bit-bangs it by polling +4 and writing +0xc
+pit0_pcsr = 0xfc080000; // type:io // PIT0 control/status; PIF is write-1-to-clear; EN is written before PMR
+dspi_base = 0xfc05c000; // type:io // DSPI (SPI master): CS42448 codec on PCS0, DS1390 RTC on PCS1, polled; matches OT_DSPI_BASE in src/board/ot-board.c
+dtim0_base = 0xfc070000; // type:io // DTIM0..3 at stride 0x4000 (DTIM3 = 0xfc07c000); the Octatrack's time base; matches OT_DTIM0_BASE
+pit1_base = 0xfc084000; // type:io // PIT1 — the kernel's one-shot sleep/timeout timer (k_pit1_timeout_service)
+pit2_base = 0xfc088000; // type:io // PIT2 — referenced 35 times in the image; RM stride below PIT0/1
+pll_pcr = 0xfc0c4000; // type:io // PLL PCR; the firmware requires fsys 264 MHz at boot; matches OT_PLL_PCR in src/board/ot-board.c
+eport_base = 0xfc094000; // type:io // Edge Port: EPPAR +0, EPDDR +2, EPIER +3, EPDR +4, EPPDR +5; the frame IRQ is EPORT IRQ1 — the DSP HREQ pin, exactly ot-board.c's wiring
+podr_uart = 0xfc0a4009; // type:io // PODR_UART; bit 2 is driven alongside the ATA pin mux (card enable)
+ppdsdr_uart = 0xfc0a4039; // type:io // PPDSDR_UART pin-state: bit 3 = CompactFlash card detect (SET means NO card, measured); polled by fs_card_detect_poll
+dsp_core_select = 0xfc0a400c; // type:io // GPIO core select, set per eDMA transfer state
+
+# ---- live state: RAM whose value only means something on a running Octatrack ----
+
+# sequencer live state (SRAM), confirmed on the fx2 fixture at 120 BPM
+seq_project_tempo_addr = 0x80000020; // type:data region:sram // project-wide tempo, u32 BPM*24; reads 2880 = 120x24
+seq_pattern_tempo_enable_addr = 0x80000024; // type:data region:sram // 0 = one project tempo, nonzero = per-pattern; reads 0 (project mode)
+seq_tempo_addr = 0x80001814; // type:data region:sram // the live tempo u32, the sequencer's only rate input; reads 2880
+seq_recip_addr = 0x80001820; // type:data region:sram // tempo reciprocal (int32)0x80000000/tempo; reads -745654 = trunc(-2^31/2880), converts phase units to samples
+seq_track_running_addr = 0x80006500; // type:data region:sram // 16 x u8 per-track running flags; measured all-zero stopped, 0x01 per audio track during PLAY, back to zero after STOP (gesture differential)
+seq_track_step_addr = 0x800064d0; // type:data region:sram // 16 x u8 per-track step counters (audio 0..7 at +0); advanced 0x0a->0x0d over 2.5 s of PLAY
+seq_track_tick_addr = 0x800064f0; // type:data region:sram // 16 x u8 per-track intra-step tick counters; advanced 0x00->0x04 during PLAY
+seq_master_step_addr = 0x800065b2; // type:data region:sram // pattern-level step counter u16; advanced 0x000a->0x000d during PLAY
+seq_master_tick_addr = 0x800065b6; // type:data region:sram // intra-step MIDI-clock counter u8; advanced 0x00->0x04 during PLAY
+seq_split_flag_table_addr = 0x80001798; // type:data region:sram // per-slot-pair 'already due' flags, one word per two slots; content during PLAY
+seq_split_table_addr = 0x800017d6; // type:data region:sram // per-slot landing offset in the 16-frame block, one byte each; content during PLAY
+
+# storage / filesystem live state, cross-checked against the CF card image
+fs_mount_kind = 0x460d1cb8; // type:data region:sdram // 0 nothing / 1 CF card / 2 in-image archive; reads 1 with a card, 0 booted with --cf-card none (differential)
+ata_driver_object_ptr = 0x460d16cc; // type:data region:sdram // global driver object pointer, 0 = no card; reads ata_driver_object (0x46c85c76) with a card, 0 without (differential)
+ata_driver_object = 0x46c85c76; // type:data region:sdram // block-device object the factory returns: 5/5 method pointers verified into the image, then the mode bytes
+ata_mode_bytes = 0x46c85c8a; // type:data region:sdram // object +0x14: pio_mode u8, mdma i8, udma i8 (-1 unsupported); reads pio 1, mdma -1, udma -1
+ata_identify_buffer = 0x460bac18; // type:data region:sdram // 512-byte IDENTIFY DEVICE result, byte-swapped; 48-char ASCII run present, and ata_identify_ptr_field points here
+ata_identify_ptr_field = 0x46c85c8e; // type:data region:sdram // driver object +0x18: pointer to ata_identify_buffer; reads 0x460bac18 exactly
+fs_device_desc = 0x460bac0c; // type:data region:sdram // 12-byte block-device descriptor: +4 partition LBA, +8 sector count; reads 63/130977 matching the card MBR
+fs_volume_desc = 0x46107990; // type:data region:sdram // volume geometry: +0 spc, +1 is_fat32, +2 nfats; reads 1/1/2 matching the card BPB (FAT32)
+fs_fat_ram_base = 0x4eceb400; // type:data region:sdram // the resident FAT / shared sector buffer; first 512 B read bit-identical to the card's on-disk FAT. SHARED: the FAT driver (0x40017xxx-0x40019xxx) and USB mass-storage (0x4001c7xx/0x4001ecxx compute base+lba<<9 into it) both use this buffer — USB DISK MODE unmounts the FS and reuses it
+fs_free_bitmap = 0x46107b14; // type:data region:sdram // one bit per cluster, set when FREE; popcount 87772 == the card FAT's free-cluster count exactly
+fs_free_list_head = 0x460bae20; // type:data region:sdram // +0 first free cluster, +4 last; both within the card's cluster range (41159/128930 of 128929)
+fs_mbr_buf = 0x4ece3000; // type:data region:sdram // 512-byte staging buffer for LBA 0; content read bit-identical to the card MBR
+fs_vbr_buf = 0x4eceb200; // type:data region:sdram // 512-byte staging buffer for the partition VBR; content read bit-identical to the card VBR
+fs_api_vtable = 0x46c823fa; // type:data region:sdram // filesystem API dispatch table, 23 function pointers; all 23 verified into the image
+seq_bank_base_ptr = 0x46c82456; // type:data region:sdram // pointer to the CURRENT BANK blob; reads 0x400e21e0 = the bank blob base seq_step_reader uses (resolves the fs_project_db_ptr naming: it is the bank base, not a project DB)
+
+# battery-backed CS1 SRAM, imaged by nvram.bin (64 B each read bit-identical to the file)
+hw_cs1_base = 0x10000000; // type:data region:nvram // FB_CS1 base: external battery SRAM holding the live project working set; first 64 B == nvram.bin[0]
+pd_live_working_part_base = 0x100a4ece; // type:data region:nvram // the four WORKING part records in the live image; 64 B == nvram.bin[0xa4ece]
+pd_live_saved_part_base = 0x100ab196; // type:data region:nvram // the four SAVED part records; 64 B == nvram.bin[0xab196]
+pd_live_bank_modified = 0x100f8598; // type:data region:nvram // live twin of the bank-modified flag; 64 B == nvram.bin[0xf8598]
+
+# audio-path and UI live state (SRAM/SDRAM)
+ap_voice_wb_base = 0x80000a50; // type:data region:sram // VOICE WORKING BUFFER, 64 B/track (base + trk*64). The AMP page sits at +24: ATK@24 HOLD@26 REL@28 VOL@30 BAL@32 XVOL@34 (measured live: bytes 24-35 = 0000 7f00 7f00 4000 4000 7f00, the AMP defaults). Bytes 0-23 are the machine's own page-1 params (LV1-6 for RECEIVE; PTCH/STRT/... for sample machines). custom/coldfire/receive-amp.s reads HOLD at +26 from here — verified correct by this layout
+ap_hold_timer_counter = 0x8000485c; // type:data region:sram // per-track HOLD accumulator, +4 in the 8-byte landing/flags struct; observed climbing monotonically across a TRIG9 note
+panel_encoder_event_slots = 0x46c901e0; // type:data region:sdram // encoder event records, 8 B each; content changed across an encoder turn and was static otherwise (gesture differential)
+panel_key_hook_table = 0x46c7d8de; // type:data region:sdram // per-key hook records, 24 B each, 64 of them; image function pointers verified across the first records
+panel_encoder_hook_table = 0x46c7dede; // type:data region:sdram // per-encoder hook records, 20 B each, 7 of them; image function pointers verified across all seven
+img_gate_mk1_flag = 0x46c8d18c; // type:data region:sdram // the MK1-refusal gate flag; reads 1 running as MKII
+
+# ---- RECEIVE amp work: word-30 assembly + prep dispatch ----
+rec_word30_assemble = 0x40004c40; // type:code region:image // inside record_builder: word 30 = state word from slot_cursors+2, bit 6 (active) while the +4 counter runs (0x40004c6a/0x40004ca8), note bits 7/4 from note_flag low bits (0x40004c7a/0x40004c88), gate-off bit 5 on flag bit 2 (0x40004cb6), teardown code in the low nibble (0x40004cf8)
+rec_word30_id3_mark = 0x40004d4a; // type:code region:image // inside record_builder: reads published_machine_ids and bset/bclr #9 of word 30 on id==3 (compare byte 0x40004d51); delivered <<8 the bit is DSP bit 17, tested at core-1 P:0x38c to SKIP the whole amp-env/gain stage — patching the compare to a dead id collapses a droning RECEIVE render ~650x because the gain chain then applies to it
+note_flag = 0x80004858; // type:data region:sram // per-track 8-byte voice-lifecycle struct (+t*8): +0 one-shot flag byte, cleared every block at 0x40004d2e (bits 0/1 note-on -> word-30 bits 7/4 and counter seed; bit 2 -> gate-off bit 5); +2 the state word word 30 is based on (slot_cursors alias); +4 the climbing sample-position long (ap_hold_timer_counter alias) whose expiry makes the sample-end teardown
+prep_event_bits = 0x46104d0c; // type:data region:ram // per-track event byte (+trk); bit 4 is the one-shot TRIG event: tested at 0x4000d472 to gate the vtable-B prep dispatch, high nibble cleared every block at 0x4000d534
+prep_dispatch = 0x4000d472; // type:code region:image // inside frame_isr, after record_builder (jsr 0x4000d0e4): btst #4 of prep_event_bits, then calls machine_vtable_b[published id] (track, byte, flags) at 0x4000d49c and ORs the RETURN VALUE into record word 30 (ap_prep_return_or) — the stock note prep returns 0x100, the note-on strobe's bit 8
+seq_note_cmd = 0x46c7a810; // type:data region:ram // per-track (+trk*4) staged note command; the sequencer ISR writes 0x89d at note time (0x400a2d9c) and copies it into seq_note_event every block (0x400a2e2c)
+seq_note_event = 0x46c7e998; // type:data region:ram // per-slot (+ (sel*8+trk)*4) note-event word the frame ISR consumes at 0x4000b924-0x4000ba1e: bit 2 -> prep event bit 4 + staged flag bit 1, bit 4 -> staged flag bit 0, bit 5 -> mute-mask handling, bit 11 -> skip; NOT sample-gated — a grid trig on an empty RECEIVE track drives it
+staged_flag_source = 0x46104d1d; // type:data region:ram // per-track (+trk) staged note-flag byte, built at 0x4000b9c6/0x4000b9ee from seq_note_event bits and copied into note_flag at 0x4000c65e each block
+manual_trig_note_dispatch = 0x40083544; // type:func region:image // UI-side manual trig -> note dispatcher; branches on voice[1] at 0x400835b2, emits via 0x40005178 or writes seq_voice_cmd_immediate (0x46c7e9fa); measured NOT to run for TRIG9 taps, so the manual key gate is upstream of it
+rec_word29_gain = 0x80001850; // type:data region:sram // per-track (+trk*2) source of record word 29, the 4th gain-chain stage (0x0800 stock); x4 here is +12 dB — custom/coldfire/receive-amp.s writes 0x2000 for RECEIVE tracks because the VOL/BAL/XVOL chain at default knobs runs x0.25 vs the old bit-17 bypass (measured -12.0 dB vs -0.1 dB)
+
+# ---- sample/voice engine ----
+note_prep_shared = 0x4000f450; // type:func region:image // the STATIC/FLEX/PICKUP note-arming prep (args: track sp@64, slot sp@68); resolves the track's sample slot, marks voice active, returns 256 on success / 0 on empty-slot bail (0x4000f514->0x40006820). A no-sample track bails here — the reason RECEIVE's trigs could not use it
+note_prep_bank_sel = 0x4000f496; // type:code region:image // inside note_prep_shared: tstl the published machine id — 0 (STATIC) selects the STATIC slot/sample banks, nonzero (FLEX/PICKUP) the FLEX banks
+static_slot_meta = 0x46c90a78; // type:data region:sdram // per STATIC sample slot, stride 44: +8 must be 0 (gate), +16 sample LENGTH IN FRAMES (floored at 64; written from the WAV frame count at static_sample_load 0x40093c92; 0=empty slot, note_prep_shared bails), +20 load handle (must equal static_slot_loaded[slot]), +24 name[8] ("SINE440\0" measured). ☠ 0xac44=44100 here is the FRAME COUNT, not the sample rate — SINE440.WAV is exactly 1 s at 44.1 kHz, so the two coincide on that fixture. The sample rate lands elsewhere (WAV descriptor +8); where in the meta is unconfirmed
+flex_slot_meta = 0x46c922c4; // type:data region:sdram // per FLEX sample slot, stride 44; same shape as static_slot_meta (all-zero in fx2, which is STATIC-only)
+static_slot_path = 0x100d5b30; // type:data region:cs1 // per STATIC slot, stride 1096: the sample file PATH string ("../AUDIO/SINE440.WAV" measured); CS1 FlexBus SRAM at 0x10000000
+flex_slot_path = 0x100b14f0; // type:data region:cs1 // per FLEX slot, stride 1096: sample file path string
+static_slot_loaded = 0x46c93a24; // type:data region:sdram // per STATIC slot, u32 load handle; note_prep_shared requires it to equal static_slot_meta[slot]+20 (both 3 for the loaded SINE440 slot); 0 = not loaded
+flex_slot_loaded = 0x46c920a4; // type:data region:sdram // per FLEX slot, u32 load handle (FLEX counterpart of static_slot_loaded)
+resample_coef_table = 0x80004000; // type:data region:sram // resampler_emac's symmetric interpolation-coefficient kernel, 0x80004000..0x800047ff; the emac indexes it as (0x80004800 - frac*4) descending and (0x80004000 + frac*4) ascending — a mirrored FIR pair, center near 0x7fffffff (unity) measured live
+
+# ---- sequencer internals ----
+seq_cond_jump_table = 0x400a51a4; // type:data size:0x80 region:image // 64 signed 16-bit PC-relative offsets indexed by (condition-1), reached by `movew %pc@(0x400a51a4,%a1:l:2),%d0 ; jmp %pc@(0x400a51a4,%d0:l)` at 0x400a5194/0x400a51a0 inside seq_cond_evaluator; resolves to 16 case bodies (8 logical, 1 probability shared, 7 A:B)
+seq_cond_label_table = 0x400b2588; // type:data size:0x104 region:image // 65 string pointers, index 0='OFF', 1..8='Fill'/'Fill'/'Pre'/'Pre'/'Nei'/'Nei'/'1st'/'1st', 9..29 percent labels ('1%'..'99%'), 30..64 A:B ('1:2'..'8:8'); read out of image, all 65 verified
+seq_cond_prob_table = 0x400b3226; // type:data size:0x54 region:image // 21 threshold u32 for probability conditions 9..29, each == round(p*2^32/100): 0x028f5c29(1%)..0xfd70a3d7(99%); addressed `cmpl %a0@(-32,%a1:l:4),%d1` at 0x400a52d4 so the -32 bias makes cond 9 entry 0; NOTE base is 2 mod 4 (misaligned longword reads)
+seq_cond_rng_seed_lo = 0x400d817c; // type:data size:0x4 region:image // additive lagged-Fibonacci PRNG state s0, image value ASCII 'pong'; only refs 0x400a52c2 (addl into d1) and 0x400a52ce (store); no reseed site exists
+seq_cond_rng_seed_hi = 0x400d8180; // type:data size:0x4 region:image // PRNG state s1, image value ASCII 'ping'; refs 0x400a52ba/0x400a52c8; s1'=s1+s0, s0'=old s1 — deterministic from power-on
+seq_micro_label_table = 0x400b2528; // type:data size:0x60 region:image // 24 string pointers for MICRO TIMING: index 0='ON GRID', 1..23='1/384'..'23/384'; read via lea 0x400b2528 at 0x4002d290/0x4002d2ea
+seq_scale_table = 0x400aba50; // type:data size:0x20 region:image // MIDI-clock ticks per step by scale byte 0..6: {3,4,6,8,12,24,48,96} (index 2 = 1x = 6 ticks); wrap comparand at 0x400a3cee/0x400a3e14/0x400a3ff8, ×2646000 for step phase at 0x400a42d0
+seq_phase_per_clock_table = 0x400aba84; // type:data size:0x20 region:image // phase units per 1/n MIDI tick, 8 longs = 2646000/n for n=1..8: {2646000,1323000,882000,661500,529200,441000,378000,330750}; entry [3]=661500 is the microtick interval
+seq_quant_length_table = 0x400d80dc; // type:data size:0x44 region:image // chain/change quantise lengths in steps, 17 longs: {-1,1,2,3,4,6,8,12,16,24,32,48,64,96,128,192,256}; indexed by the pattern chain-quant byte (0x8e56) or project default at 0x8000004e
+seq_trig_quant_table = 0x400d8120; // type:data region:image // per-quantise-setting deferred-command source; read `lea 0x400d8120,%a0 ; lea %a0@(0,%d0:l:4),%a0 ; movel %a0@,...` at 0x400051cc-0x400051dc in seq_voice_cmd_emitter
+seq_goto_pattern = 0x400a0570; // type:func region:image // goto_pattern(bank,pat,start,len,prevlen): while playing (0x800065b8==1) writes only the pending pair (0x800065bf/0x800065c0); when stopped writes current+pending+previous; loads the pattern's PART (0x400a05e8) and tempo (0x400a067c)
+seq_stop = 0x4009f5bc; // type:func region:image // STOP: emits MIDI 0xFC via `pea 0xfc ; jsr 0x400108b0` at 0x4009f6ec; same byte on auto-stop 0x400a4022 and full reset 0x400a1426
+seq_track_hdr_validator = 0x4009a670; // type:func region:image // per-track header sanitiser: lea %a1@(80),%fp clamps LENGTH (+80) to 2..64 (0x4009a698-0x4009a6b2), then SCALE (+81) to 0..6 (0x4009a6b4-0x4009a6ce); advances lea %a1@(2330) for 8 tracks
+seq_cond_cycle_advance = 0x400a536c; // type:func region:image // advance_pattern_cycle(track): increments the A:B counter at 0x46107918 and latches pending FILL into latched FILL; called from the seq ISR at 0x400a3d98/0x400a3eb4 on a track step wrap
+seq_cond_cycle_reset = 0x400a539c; // type:func region:image // reset(track): zeroes the A:B counter and both FILL arrays and sets PRE flag to 1 (suppressed); arg>15 resets all 16 (moveq #15/cmpl/bcc); PRE init `moveb #1,%a1@+` at 0x400a53e6
+seq_fill_global = 0x46107958; // type:data size:0x1 region:sdram // momentary/global FILL flag; set 1 at 0x400a53fc, cleared 0x400a5408; tested first in FILL (0x400a5224) and notFILL (0x400a523e) bodies
+seq_fill_latched = 0x46107959; // type:data size:0x10 region:sdram // 16 x u8 per-track LATCHED fill state — what the evaluator tests when the global flag is clear; written by the cycle advance at 0x400a538c
+seq_fill_pending = 0x46107969; // type:data size:0x10 region:sdram // 16 x u8 per-track PENDING fill, promoted to latched at the next pattern boundary; array bound pinned by cmpal #0x46107979 at 0x400a5490
+seq_cond_pre_flags = 0x46107979; // type:data size:0x10 region:sdram // 16 x u8 per-track PRE/NEI state; stores the SUPPRESS result (0 = last conditional trig PLAYED); written by epilogue 0x400a5354 after negl; init 1 by the reset
+seq_voice_cmd_immediate_slot = 0x46c7e9fa; // type:data region:sdram // per-track (+trk*4) immediate voice-command slot the frame ISR consumes; written by seq_voice_cmd_emitter at 0x400051ee, base taken again by frame ISR at 0x4000c8a2
+seq_voice_cmd_deferred_slot = 0x800018be; // type:data region:sram // per-track (+trk*4) QUANTISED voice-command slot; written 0x400051dc when the track has trig quantisation
+seq_voice_cmd_deferred_arg = 0x800018de; // type:data region:sram // command word parked with the quantised slot; written 0x400051e0-0x400051e6
+
+# ---- MIDI subsystem ----
+# The status dispatch is midi_status_dispatch (0x400d6494) and the sync
+# gates are midi_sync_flags (0x80000028), both below; the sequencer layer
+# (track config, note emitter, RX consumption) is further down.
+midi_uart0 = 0xfc060000; // type:io region:mbar // MIDI DIN UART (ColdFire UART0); regs at +4/+8; distinct from the panel link UART1 @0xfc064000 (312500 baud) and the RX-only crossfader UART2
+midi_uart0_init = 0x40011000; // type:func region:image // configures midi_uart0 for 31250 baud (arg 0x7a12) with rx callback midi_rx_callback; called once at boot 0x4001f9c4
+midi_rx_callback = 0x40092bbc; // type:func region:image // per-byte MIDI RX callback registered by midi_uart0_init; enqueues into midi_rx_fifo
+midi_rx_fifo = 0x46104c84; // type:data region:sdram // MIDI RX byte FIFO drained by midi_parser
+midi_parser = 0x40092bf4; // type:func region:image // deferred MIDI RX parser: consumes midi_rx_fifo, splits realtime (0xf8..) and sysex-end (0xf7) from channel-voice status, applies running status
+midi_send = 0x40010bc8; // type:func region:image // THE MIDI DIN output entry (50 refs measured); serializes a channel-voice message, suppressing a duplicate status byte via the running-status lock at 0x460ba978/0x460ba988
+
+# ---- MIDI message dispatch ----
+midi_status_dispatch = 0x400d6494; // type:data region:image // channel-voice handler table indexed by (status>>4)-8: [0]=note-off [1]=note-on [2]=poly-AT [3]=CC [4]=prog-change [5]=chan-press [6]=pitch-bend; used by the MIDI parser (☠ the adjacent table at 0x400d6474 is machine_vtable_c, not MIDI)
+midi_note_off = 0x4000db98; // type:func region:image // MIDI note-off handler (midi_status_dispatch[0])
+midi_note_on = 0x4000e018; // type:func region:image // MIDI note-on handler (midi_status_dispatch[1])
+midi_poly_at = 0x4000a640; // type:func region:image // MIDI polyphonic aftertouch handler (midi_status_dispatch[2])
+midi_cc = 0x4000e79c; // type:func region:image // MIDI control-change handler (midi_status_dispatch[3])
+midi_prog_change = 0x4000da40; // type:func region:image // MIDI program-change handler (midi_status_dispatch[4])
+midi_chan_press = 0x4000a51c; // type:func region:image // MIDI channel-pressure handler (midi_status_dispatch[5])
+midi_pitch_bend = 0x4000a3e0; // type:func region:image // MIDI pitch-bend handler (midi_status_dispatch[6])
+machine_vtable_c = 0x400d6474; // type:data region:image // THIRD per-machine table (after machine_vtable_a 0x400d6434 / _b 0x400d6454), 8 entries all 0x40001850 (a bare rts) — an unused per-machine hook; loaded as a base at 0x40005552
+
+# ---- USB device / mass-storage ----
+usb_ctrl_base = 0xfc0b0140; // type:io region:mbar // USB device controller (Chipidea/ARC EHCI-derived): USBCMD +0, USBSTS +4, USBINTR +8, EPLISTADDR +0x18, OTGSC +0x64, USBMODE +0x68 (=0x0E device+BE)
+usb_dev_bringup = 0x4001d630; // type:func region:image // USB device-controller bring-up: writes USBMODE=0x0E (0xfc0b01a8), EPLISTADDR=0x4ec94800 (0xfc0b0158), USBINTR (0xfc0b0148)
+usb_descriptor_fixup = 0x4001d570; // type:func region:image // boot-time patch of 8 USB descriptor length fields the shipped table leaves 0: the four config wTotalLengths (0x400e201e/203e/205e/207e := 32) and the string-descriptor lengths (string0=4 @0x400e20a2, manufacturer=48 @0x400e20a6, product=50 @0x400e20d6, serial=26 @0x400e2108); called from boot at 0x4001fc40
+usb_disable = 0x4001d6a0; // type:func region:image // USB controller disable primitive
+usb_isr = 0x4001e594; // type:func region:image // USB interrupt handler (INTC1 source 47, vector 0xAF, level 4; installed 0x4001e012); 0xDEAD5AFE reentry guard at 0x4001e59c
+usb_scsi_bot_dispatch = 0x4001e044; // type:func region:image // SCSI-over-Bulk-Only-Transport CBW handler (signature 0x55534243, 31-byte CBW); routes 11 opcodes across the reduced/full trees, gated on card+medium present
+usb_scsi_dispatch_reduced = 0x4001e0b2; // type:code region:image // no-medium SCSI tree: INQUIRY/START-STOP/PREVENT-ALLOW/REQUEST-SENSE/TEST-UNIT-READY
+usb_scsi_dispatch_full = 0x4001e192; // type:code region:image // medium-present SCSI tree: adds MODE SENSE6/READ CAPACITY/READ10/WRITE10/VERIFY/MODE SENSE10; unknown -> stall (0x4001e56e)
+usb_scsi_read_capacity = 0x4001e33e; // type:code region:image // READ CAPACITY(10): last LBA from the ATA IDENTIFY buffer word 60, block size 512
+usb_attach = 0x4001eb44; // type:func region:image // usb_attach(1)=attach / (0)=detach the device to the host
+usb_diskmode_enter = 0x4007ebd4; // type:func region:image // USB DISK MODE enter: unmounts the CF card and calls usb_attach(1); UI prepare at 0x4007eb34
+usb_diskmode_exit = 0x4007ebf0; // type:func region:image // USB DISK MODE exit: usb_attach(0) then remounts the card
+
+# ---- display / panel-link / UI ----
+panel_screen_refresh = 0x40013abc; // type:func region:image // the whole screen refresh, one function: (1) clear 1024 B of the back buffer (moveq #64, 4x clrl @+ at 0x40013ac4 on panel_back_ptr 0x400b9710); (2) composite the canvas at *panel_composite_canvas_ptr (0x460babf0) with dst=(dst&~mask)|(mask&ink) at 0x40013bd8; (3) diff back vs front in 8-byte blocks and TX only changed blocks; (4) swap front/back at 0x40013d5a-0x40013d6c. 14 jsr sites.
+canvas_draw_span = 0x400125ac; // type:func region:image // canvas primitive: reads stride at cv@(8) and ink plane at cv@(12); called by ui_task with screen_canvas (0x40061aba); one of the low-level plane writers under draw_string
+uart1_panel_init = 0x40010efc; // type:func region:image // UART1 (panel) setup(baud): clears TX ring indices, pin mux (0xfc0a4069=0x33, 0xfc0a4066=0x43), UCR resets 0x20/0x30/0x40/0x10 to 0xfc064008, UMR1=0x13 UMR2=0x07, divisor from uart_ref_clock (0x400b9654), UCR=5, installs rx callback into panel_rx_callback_ptr, installs vector 0x5b -> uart1_isr, CIMR/ICR source 27. Called at 0x4001f96e (main) and 0x4000f9c6 (bootloader, NULL rx)
+uart1_isr = 0x400109bc; // type:func region:image // UART1 ISR (vector 0x5b, INTC source 27): RX loop 0x400109ca-0x400109e8 `while(UCSR1&1) rx_cb(URB1)` dispatching to *panel_rx_callback_ptr; TX loop 0x400109f2-0x40010a2e drains panel_tx_ring to UTB (0xfc06400c) while panel_tx_count && TXRDY
+panel_tx_byte = 0x40010aa4; // type:func region:image // enqueue one byte (arg low byte at sp@(11)) into panel_tx_ring under IPL7, then write 0x03 to UIMR1 (0xfc064014) to unmask TXRDY; spins while panel_tx_count > 2046; 12 refs
+panel_tx_bytes = 0x40010b1c; // type:func region:image // enqueue N bytes (buf, len) into panel_tx_ring, same IPL7 + UIMR1=0x03 per byte; 5 refs (display block flush, boot handshake)
+panel_tx_lock = 0x40010db0; // type:func region:image // k_mutex_lock(panel_tx_mutex 0x400b96f4) — opens a panel packet; called at panel_screen_refresh 0x40013d0a and every LED sender
+panel_tx_unlock = 0x40010d90; // type:func region:image // sem/mutex release of panel_tx_mutex (jmp k_mutex_unlock 0x40000ab4) — closes a panel packet
+panel_tx_pending_get = 0x40010b00; // type:func region:image // movel panel_tx_count,%d0; rts — bytes queued in the TX ring
+panel_tx_free_get = 0x40010b08; // type:func region:image // returns 2048 - panel_tx_count — free space in the TX ring
+panel_tx_ring = 0x400b96bc; // type:data size:0x800 region:image // 2048-byte outbound byte ring to the panel MCU (the TX counterpart of panel_rx_ring); base pointer read at 0x40010ad4/0x40010b54/0x400109ec
+panel_tx_readidx = 0x400b96c4; // type:data region:image // ISR-side drain index into panel_tx_ring (descending, & 2047)
+panel_tx_wridx = 0x400b96c8; // type:data region:image // producer-side write index into panel_tx_ring (descending, & 2047)
+panel_tx_count = 0x400b96cc; // type:data region:image // bytes currently queued in panel_tx_ring; incremented under IPL7 by the enqueuers, decremented by uart1_isr
+panel_tx_mutex = 0x400b96f4; // type:data region:image // mutex guarding the panel TX ring; taken by panel_tx_lock, released by panel_tx_unlock
+panel_rx_callback_ptr = 0x460ba980; // type:data region:sdram // installed UART1 RX per-byte callback (= panel_rx_handler 0x40092254 after main init); uart1_isr calls through it
+uart_ref_clock = 0x400b9654; // type:data region:image // UART bus reference clock used to compute the UART1/UART0 baud divisor (shared 0x50-byte UART driver)
+panel_tx_block_buf = 0x46c8546a; // type:data region:sdram // 8-byte staging buffer for one changed display block; filled at 0x40013cf6 then TX'd as the packet payload
+draw_string = 0x40012bd8; // type:func region:image // draw_string(canvas, x, y, font, str): renders a NUL-terminated string (str at sp@(88), char loop 0x40012cde-0x40012ce6) into the canvas ink plane; reads font descriptor fields widths@+8, offsets@+12, bitmap@+16 (matches font_table layout); the cell_height>8 -> 2-bytes-per-column branch is at 0x40012c2a; 189 jsr sites, the image's text primitive
+led_bicolour_set = 0x40013248; // type:func region:image // set(id, color) on led_state_ui: two adjacent bits per LED (id and id+1), lights one and clears the other — a bicolour (red/green) lamp
+led_toggle = 0x40013304; // type:func region:image // toggle(id): XOR bit (1<<(id&7)) in led_state_ui[id>>3]
+led_get = 0x4001332c; // type:func region:image // get(id): returns 0/-1 for bit (id&7) of led_state_ui[id>>3] (sne/negl)
+led_byte_set = 0x40013354; // type:func region:image // set a whole 8-LED group byte: led_state_ui[idx] = byte (arg at sp@(11))
+led_pair_clear = 0x4001321c; // type:func region:image // clear the 2-bit bicolour field for id in led_state_ui; 4 refs (0x4002eb30, 0x4002ec16, 0x40033f8a, 0x40040928)
+led_send_onoff = 0x40013634; // type:func region:image // TX one 8-LED group's on/off delta to the panel: reads led_state_c[idx]^led_state_ui[idx], emits class byte 0x20|idx (idx<=15) or 0xa0|idx (idx>15) then the state byte, caches into led_state_b[idx]; reached only via pointer from led_flush_all
+led_send_brightness = 0x400135b0; // type:func region:image // TX per-LED brightness [0x30|idx][value]; dedups against led_brightness_shadow (0x400b9714); 54 refs — the LED brightness API. ui_task blanks all 88 LEDs by calling it with (0..87, 0xff) at 0x40061b7e
+led_flush_all = 0x400136a8; // type:func region:image // walk 17 LED groups, call led_send_onoff for each changed group (compares led_state_c vs led_state_ui); 6 refs from UI redraw sites
+led_state_ui = 0x460ba98c; // type:data size:0x11 region:sdram // 17-byte UI-facing LED on/off bitmap (1 bit per lamp, or 2 bits/lamp for bicolour); written by led_bicolour_set/led_toggle/led_byte_set, read by the flush
+led_state_c = 0x460ba9ae; // type:data size:0x11 region:sdram // 17-byte third LED state array; XOR'd against led_state_ui to find changed groups in led_flush_all
+led_brightness_shadow = 0x400b9714; // type:data size:0x100 region:image // last-sent per-LED brightness (256 bytes); led_send_brightness dedups against it; reset to 0xff at 0x40013860
+ui_task = 0x40061a94; // type:func region:image // the main UI task: inits screen_canvas via canvas init (0x400125ac @0x40061aba), blanks all 88 LEDs (0x40061b7e), then enters the event loop; calls panel_screen_refresh at 0x40061bfe
+ui_event_dispatch = 0x40061cd2; // type:code region:image // event loop body inside ui_task: k_queue_recv(ui_queue 0x460d17ae) at 0x40061cd8, type byte -= 1, bound (u8)>77 -> default, 16-bit jump table at ui_event_jumptable
+ui_event_jumptable = 0x40061cfa; // type:data region:image // 78-entry 16-bit jump table for UI event types; jmp %pc@(0x40061cfa,offset); slot1(type1 key)=+0xb2, slot2(type2 enc)=+0xd8, slot4(type4 xfader)=+0x110
+ui_ev_key_handler = 0x40061dac; // type:code region:image // type-1 (key) arm: extracts id (ev@+2) and state (ev@+1), stamps timestamp to 0x46c7e956, calls key_dispatch(id,state)
+ui_ev_encoder_handler = 0x40061dd2; // type:code region:image // type-2 (encoder) arm: extracts encoder (ev@+1) and delta (ev@+2), clears panel_encoder_pending_flags[enc] (0x46c90250) under IPL7, calls encoder_dispatch(enc,delta)
+ui_ev_xfader_handler = 0x40061e0a; // type:code region:image // type-4 (crossfader) arm: clears 0x46c90a6c under IPL7 and republishes the crossfader curve
+key_dispatch = 0x40031734; // type:func region:image // key_dispatch(id, state): bounds id<=63, indexes 24-byte records at panel_key_hook_table (24*id + 0x46c7d8ea = base+12), walks a per-key handler linked list (head 0x460d165c) and calls each; the sole caller is ui_ev_key_handler (0x40061dca)
+encoder_dispatch = 0x40031944; // type:func region:image // encoder_dispatch(enc, delta): bounds enc<=7, indexes 20-byte records at panel_encoder_hook_table (20*enc + 0x46c7dede), tail-calls the registered handler
+ui_key_handler_list = 0x460d165c; // type:data region:sdram // head pointer of the active per-key UI handler list walked by key_dispatch
+
+# ---- machine vtable entries ----
+thru_stager = 0x40004424; // type:func region:image // machine vtable A[2]: THRU audio handler; checks voice[0x34]-voice[0x30] >= 0 and ZERO-FILLS its output when the voice is spent — the stock stopping mechanism RECEIVE's handler deliberately does not use
+thru_prep = 0x400043f4; // type:func region:image // machine vtable B[2]: THRU's per-machine prep; writes voice[0x30]=0, voice[0x34]=64, voice[0x14]=type, voice[0x00]=0xff (the four fields custom/coldfire/receive.s replicates)
+
+# ---- CF sample loader / WAV parser ----
+fs_pread = 0x400180c8; // type:func region:image // [C] positioned filesystem read used by the STATIC loader: takes the volume mutex (0x461079c0 via k_mutex_lock 0x400009f4), validates the fid (<=510) then reads. EVIDENCE: prologue 0x400180c8-0x400180f2; the STATIC loader calls it at 0x40093d26 (handle, sector, count)
+wav_header_parse = 0x400210fc; // type:func region:image // [C] parse_audio_header(handle, out_desc): bzeros an 82-byte descriptor (0x52 at 0x4002110e via 0x40020950), then reads the container magic and walks chunks, filling the descriptor. Handles BOTH RIFF/WAVE and AIFF: 'FORM' 0x464f524d -> AIFF path (checks 'AIFF' 0x41494646 / 'AIFC' 0x41494643 at 0x40021192); else 'RIFF' 0x52494646 -> 'WAVE' 0x57415645 path (0x400213ec/0x4002140c, returns -30 on magic mismatch). Chunk switch at 0x40021472: 'fmt ' 0x666d7420 -> 0x400214a8, 'data' 0x64617461 -> 0x40021544, 'cue ' 0x63756520 -> 0x400215c8, 'smpl' 0x736d706c -> 0x4002157e. Closes the file via fs vtable +0x28 at 0x40021612. EVIDENCE: entry+prologue 0x400210fc; magic literals as noted; two callers only (0x40093b14 STATIC, 0x40096710 FLEX)
+wav_parse_scratch = 0x460bcdc8; // type:data region:sdram // [C] 512-byte sector staging buffer the parser reads chunk headers/bodies into; +4 (0x460bcdcc)=current chunk id, +8 (0x460bcdd0)=chunk size / 'WAVE' tag, +0x0e (0x460bcdd6)=channels, +0x10 (0x460bcdd8)=sample rate, +0x18 (0x460bcde0)=bits. EVIDENCE: read target at 0x40021158/0x40021444; every fmt/data field read from 0x460bcdxx
+static_sample_load = 0x40093980; // type:func region:image // [C] load/arm a STATIC sample slot for streaming. arg0 (fp@8) = static slot index, range-checked <=128. Resolves BOTH per-slot records itself: a4 = static_slot_path[slot] (0x100d5b30 + slot*1096, at 0x400939a0) and a3 = static_slot_meta[slot] (0x46c90a78 + slot*44, at 0x400939b6). Builds "<set>/<project>/<path>" (fs_project_path_builder 0x40025230 at 0x40093a0a), opens "r" (0x400b3289) via fs vtable +0x30, calls wav_header_parse (0x40093b12), validates bits {8,16,24,32} (0x40093b30) and channels 1..2, checks declared byte length against the file size (0x40093c0c), then POPULATES static_slot_meta and primes the first block from the card via fs_pread (0x40093d26). Does NOT load the whole file into RAM — STATIC streams. Callers: 0x40084c1c, 0x4009086a. EVIDENCE: entry 0x40093980; slot->path 0x400939a0, slot->meta 0x400939b6; parser 0x40093b12; fs_pread 0x40093d26
+static_stream_read = 0x40093064; // type:func region:image // [C-entry/U-role] STATIC streaming top-up reader. Entry 0x40093064 (lea sp@(-N); moveml %d2-%d7/%a2-%fp at 0x40093068; the prior function's rts is at 0x40093062). Computes a byte offset, converts to a sector (>>9) and pulls from the card via fs_pread 0x400180c8 (call at 0x4009318e); references fs_fid_table 0x46c8657e and 0x400d7c3c, uses a 64-block unit (moveq #64,%d6 at 0x40093160). Role as the play-time ring refill is [U] — confirm by tracing its caller and where its read buffer lands
+flex_sample_load = 0x40096548; // type:func region:image // [C] load a FLEX sample fully into the RAM sample heap. arg0 (fp@8) = flex slot index, range-checked <=135; resolves flex_slot_path (#1096 stride) and builds "<set>/<project>/..." via fs_project_path_builder (0x40025230 at 0x400965fe). Opens "r" via fs vtable +0x30, calls wav_header_parse (0x40096710), validates bits {8..24} and channel/frame-count (frame count fp@-84 must be nonzero). Applies SAMPLE-RATE CONVERSION (0x40096776: reads project rate flags 0x80000052/0x80000053 and rate word 0x80000056, muluw #0xac44=44100 at 0x40096784), then ALLOCATES from the paged sample heap: total bytes = (channels+1)*bytes*frames rounded UP to 6144-byte pages (0x40096876-0x4009688c: addil #6143; remsl #6144). Writes flex_slot_meta (a3): +36 handle, +40 data offset, +16 length. Callers: 0x40084b4c, 0x4009091e. EVIDENCE: entry 0x40096548; slot<=135 at 0x40096554; parser call 0x40096710; page rounding at 0x40096880; heap-table init at 0x40096500 (see below)
+sample_heap_base = 0x40a955e0; // type:data region:sdram // ★[C] base of the RAM sample-PCM heap, a paged allocator with 6144-byte pages. FLEX PCM address = 0x40a955e0 + page*6144 + frame*bytesPerFrame (flex_pcm_read adds literal #0x40a955e0 at 0x40094a3c and 0x40094a9c). ARITHMETIC PROOF it is the end of the resident bank blobs: 0x400e21e0 (dsp_bootstrap_a / bank base) + 16*0x9b340 = 0x40a955e0 exactly (the STATIC/FLEX slot-usage scan walks banks to this sentinel at 0x400254f2/0x400254f8). DUAL USE (disjoint in time): at boot this same RAM is the staging buffer the DSP payload is assembled into before upload (pd_memcpy dst=0x40a955e0 src=dsp_bootstrap_a len=0x96, then src=dsp_payload_a len=0x136cb, at 0x4000045c/0x40000476); after DSP bring-up it is repurposed as the sample heap
+sample_heap_silence_page = 0x40a96de0; // type:data region:sdram // [U] fallback page flex_pcm_read returns for an out-of-range read (lea 0x40a96de0 at 0x40094a62); presumed a zero/silence page
+flex_page_map_ptr = 0x80006914; // type:data region:sram // [C] pointer to the flex page-index map (word entries: logical page -> physical 6144-byte page number). Set under IPL7 at 0x40096502; read by flex_pcm_read at 0x40094a82
+flex_slot_basepage_tbl = 0x80006918; // type:data region:sram // [C] pointer to the per-slot base offset into flex_page_map (image value 0x46c2e580, set at 0x4009650e); flex_pcm_read indexes it by slot (a0@(0,d6:l:4)) at 0x40094a7e
+flex_heap_free_base = 0x8000691c; // type:data region:sram // [C] base of the free-page-index stack; (0x80006920 - 0x8000691c) = number of free pages remaining. Read at 0x40094758, 0x40006dc0, 0x400071be
+flex_heap_free_top = 0x80006920; // type:data region:sram // [C] top-of-stack cursor for the free-page-index stack; decremented on alloc (0x400071cc). ☠ FREE count, NOT the total: flex_heap_init seeds it to 14602 (movel #0x390a at 0x40096f80), then the recorder reserve is popped off before the UI is up — a no-FLEX boot reads 10922 because 3680 pages are already the recorders'
+flex_free_page_stack = 0x46c2e9c0; // type:data region:sdram // [C] the free-page-index stack (word entries), popped at 0x400071d2 (movew a1@(0,d0:l:2)); seeded with physical pages 1..14602 in order at 0x40096fa4-0x40096fb0, so allocation (top-down pop) hands out the HIGHEST pages first. Doubles as the flex logical->physical page map (flex_page_map_ptr points here). First block of the page-map complex, see flex_page_map_area
+flex_slot_pagecount_tbl = 0x46c75e88; // type:data region:sdram // [C] per-flex-slot page count (word entries); flex_pcm_read multiplies a slot's count by 6144 at 0x40094742/0x4009474e; also read at 0x40006dc6, 0x400071f4
+flex_slot_loaded_byte = 0x46c93c28; // type:data region:sdram // [C] per-flex-slot loaded/state byte; flex_sample_load clears it at 0x400965ce/0x4009653a on (re)load
+sample_slot_getter = 0x400946d8; // type:func region:image // [C] slot_meta(type, slot): type 0 -> static_slot_meta 0x46c90a78 (slot<128), type 1/4 -> flex_slot_meta 0x46c922c4 (slot<135, gated on 0x46105408). EVIDENCE: 0x400946d8-0x4009472e
+flex_pcm_read = 0x4009499c; // type:func region:image // [C] read_flex_pcm(slot, frame, ...): resolves the flex slot descriptor (sample_slot_getter type=1), maps logical->physical page via flex_page_map_ptr/flex_slot_basepage_tbl, returns a pointer into sample_heap_base. Handles loop wrap. Called by the WAV exporter (0x40021072) and 0x4008e4f6
+flex_sample_export = 0x40020f04; // type:func region:image // [C] write a FLEX slot back to the card as a .WAV: assembles a 44-byte RIFF/WAVE/fmt/data header in a staging buffer (0x46c2d980) with 44100 rate (0x40020fca/0x40020fd8), then streams PCM out through file-write helper 0x400166b8, pulling source samples via flex_pcm_read and the mono/stereo readers 0x40097b54/0x40097f8c. EVIDENCE: header build 0x40020f6a-0x40021026; write loop 0x40021068-0x400210ca
+wav_write_header_buf = 0x46c2d980; // type:data region:sdram // [C] 44-byte WAV header staging buffer flex_sample_export assembles the RIFF/WAVE/fmt/data header in
+
+# ---- sample-heap initializer / recorder reserve ----
+flex_heap_init = 0x40096f24; // type:func region:image // ★[C] (re)initialize the whole sample heap + recorder reserve. Resets flex slots 0..127 then recorder slots 128..135 (loops at 0x40096f3a/0x40096f64 over slot-reset 0x40096300), then seeds the allocator: free_base=0, free_top=14602 (#0x390a at 0x40096f80), fills flex_free_page_stack with pages 1..14602 (0x40096fa4), memsets the WHOLE heap — pea 0x40a955e0, len #0x05590800 = 14603*6144 at 0x40097006 — which puts the heap top at 0x40a955e0+0x5590800 = 0x46025de0 = sdram_bss_start EXACTLY: the heap runs all the way to the BSS, there is NO gap above it. Then per recorder r=0..7 computes the reserve (0x400970d2-0x4009710c): 0 pages if r >= reserved-recorder count (byte 0x80000054); else ceil(44100 * len_word(0x80000056) * bpf / 6144) pages where bpf = 6 if 24-bit flag byte 0x80000053 else 4; the whole heap (14602) if MAX flag byte 0x80000052 is set — and calls recorder_reserve_alloc(r). fx2 defaults (len=16 s, 8 recorders, 16-bit): 8*ceil(44100*16*4/6144) = 8*460 = 3680 pages reserved, leaving free_top = 10922 — the value previously misread as the heap total. Callers: 0x4001fbb4 (boot/project load) and five 0x40085xxx project-menu sites
+recorder_reserve_alloc = 0x400948cc; // type:func region:image // [C] allocate recorder r's reserve: target page count from recorder_reserve_pages_tbl[r] (0x461053a8 at 0x400948fe), pops pages off flex_free_page_stack under IPL7 (0x4009491a) into the recorder's own map block at 0x46c2e9c0 + (r+2)*0x7214 bytes. Errors -5 when the stack runs dry (0x40094938)
+recorder_reserve_pages_tbl = 0x461053a8; // type:data region:sdram // [C] per-recorder reserve page count, u32 x8, written by flex_heap_init at 0x40097118 (with shadow copies at 0x461053c8 and 0x461053e8)
+flex_page_map_area = 0x46c2e9c0; // type:data region:sdram // [C] the page-map complex: TEN blocks of 14602 words (0x7214 bytes) each — block 0 = flex logical map / free stack, block 1 = its shadow (alloc clears entry and entry+14602 at 0x400071d8/0x400071e2), blocks 2..9 = recorder 0..7 page maps (recorder_reserve_alloc addresses block r+2 at 0x400948f6). Ends at 0x46c2e9c0 + 10*0x7214 = 0x46c75e88 = flex_slot_pagecount_tbl exactly
+sample_heap_end = 0x46025de0; // type:data region:sdram // ★[C] one past the sample heap: 0x40a955e0 + 14603*6144 (memset length #0x5590800 at 0x40097006) = sdram_bss_start. Heap total is 14602 allocatable pages (page 0 reserved) = ~85.6 MB; the recorder reserve (top-down allocation) occupies the top ~22 MB on default settings
+recorder_settings_nvram = 0x100b14b1; // type:data region:cs1 // [C] NVRAM mirror of the project MEMORY settings, bytes: +0 (0x100b14b1) LOAD_24BIT_FLEX, +1 DYNAMIC_RECORDERS, +2 RECORD_24BIT, +3 RESERVED_RECORDER_COUNT, +5..6 word RESERVED_RECORDER_LENGTH — copied to the SRAM staging bytes 0x80000051..0x80000057 and BACK from BSS staging 0x460e4550 at 0x40066866-0x400668ba. Poking 0x100b14b6 in nvram.bin before boot moves the recorder reserve exactly per the flex_heap_init formula (measured: 16 s -> free 10922, 24 s -> free 9082)
+
+# ---- SDRAM tail occupants ----
+boot_stack_top = 0x48000000; // type:data region:sdram // [C] reset code parks %sp here (moveal #0x48000000,%sp at 0x40000412); live interrupt/boot frames stay within the top bytes (0x47ff8000..0x47ffff00 survives the whole heavy suite, content seen only above 0x47ffff00)
+usb_diskmode_workmem = 0x4ecc9040; // type:data region:sdram // [C-extent/U-layout] USB DISK MODE working memory 0x4ecc9040..0x4ece3000: canary at 0x4ecd9040 rewritten during the DISK MODE leg only
+fs_bitmap_end = 0x4f4eb800; // type:data region:sdram // [C] hard upper bound of the fs arena's free-cluster bitmap walk (cmpal #0x4f4eb800 at 0x40017792, companion table at 0x4f4eb600) — the arena 0x4ece3000..0x4f4eb800 is pre-sized for the largest FAT, so a big card grows into it, never below 0x4ec94800
+static_stream_rings = 0x4f502c10; // type:data region:sdram // ★[C] eight per-track STATIC stream rings, 0x158880 B each, ending at 0x4ffc7010: ring pointer = offset mod #0x158880 + #0x4f502c10 (0x400032f8-0x4000330e in the transfer ISR region). Zeroed wholesale at first playback (every stamped slice 0x4f600000..0x4ff00000 memset to 0 during the first TRIG9 window)
+stream_sector_staging = 0x4ffc9010; // type:data region:sdram // [C-use/U-layout] stream sector staging above the rings: 0x4ffc7610 (static_stream_read 0x400931aa), 0x4ffc9010 (STATIC loader 0x40093d82/0x40094622), 0x4ffcb210/0x4ffcb220 (FLEX loader 0x400961xx), all with sector arithmetic (andil #511) around them
+aed_clipboard_kind = 0x460d0ffa; // type:data region:sdram // [C] clipboard type tag; the AED paste guard (0x40027880) requires 25 before the NOTHING TO PASTE check passes. Setter family 0x40026974..0x4002776c
+aed_clipboard = 0x460c8122; // type:data region:sdram // [C] the clipboard object: metadata words 0x460c8122/0x460c812a, payload from 0x460c812e (writers 0x400268d6/0x40026b0a/0x40026d46) — BSS-resident, no high-SDRAM scratch; no gap writes with AED open
+voice_pcm_buffers = 0x80004a40; // type:data region:sram // voice block +0x68: FOUR per-voice PCM buffer pointers (ping-pong x stereo) into SDRAM (~0x469xxxxx). This is where STATIC's streamed / resampled 16-bit PCM lands — confirmed live: 0x46a49e80 held a clean rising-then-falling SINE440 quarter-cycle (peak ~0x3e7f) while its ping-pong pair read zero. voice block base = 0x800049d8 + trk*168, so track T's pointers are at 0x800049d8 + trk*168 + 0x68
+
+# ---- scene / crossfader morph + arranger ----
+param_snapshot_base = 0x40170f60; // type:data region:sdram // live per-track parameter snapshot the per-block publisher reads; record stride = part*6322 (0x18b2) + bank*635712 (0x9b340). Sub-blocks: +0x10 (0x40170f70) machine/SRC values (par_apply_part writes here, 0x40009e1c); +0x22 (0x40170f82) machine-id + flags; +0x2a (0x40170f8a) the block the frame publisher copies to voice wb; +0x11a (0x4017107a) and +0x1da (0x4017113a) further blocks
+scene_param_get = 0x40031f44; // type:func region:image // scene_lock_get(scene): resolves the scene p-lock block = bank_base(seq_bank_base_ptr 0x46c82456) + cur_part(0x100b14cf)*6322 + (scene*8+track)*32 + 0x8f3e2 (586722). 0xff sentinel = "not locked in this scene" (moveq #-1; cmpl scan over the 32-param row). Two aux arrays follow at +0x903e2 (590818) and +0x903eb (590827).
+scene_ab_state_builder = 0x40034a44; // type:func region:image // per-track loop (d2 counter) that calls scene_param_get and, on hit, seeds scene A/B selection = (0,1) with lock-present flag, else (15,15) cleared. Feeds the per-track scene-A/B indices used by the morph.
+scene_lock_collect = 0x400339d8; // type:func region:image // builds two per-track 64-byte scene-lock presence masks (0x46c7d48c, 0x46c7d2e4) by scanning the active pattern's scene p-lock rows in the bank blob (base 0x46c82456 + cur_pattern(0x100b14d0)*0x8ed8), 32 params/row, ORing a per-track bit where the value != 0xff.
+scene_morph_frame = 0x4000c202; // type:code region:image // inside frame_isr, per track: reads the scene-A and scene-B locked param values out of the scene p-lock store (bank+0x8f3e2, i.e. lea 0x401715c2 for part0/bank0) at (sceneIdx*8+track)*32+slot and packs 32 (A,B) byte pairs into scene_ab_pair_buf (0x80000ed4 + track*64). The scene-A/B indices come from the snapshot byte at 0x4017122a (+track).
+scene_ab_pair_buf = 0x80000ed4; // type:data region:sram // per-track 64 bytes = 32 (sceneA_value, sceneB_value) byte pairs, written by scene_morph_frame; consumed by scene_level_morph as the crossfade endpoints. (Existing xrefs 0x40002284..0x40096ed0 are its many readers/writers.)
+scene_level_morph = 0x4000cc60; // type:code region:image // inside frame_isr: EMAC msacw crossfade of the scene A/B LEVEL pairs (scene_ab_pair_buf 0x80000ed4) by the crossfader coefficient pairs (fader_levels 0x80003c60) into track_scene_levels (0x80000c80) and 0x800010d4. Gated by 0x80000006 (morph enable) and 0x80000007 (a full-scale 0x7f00 bypass fill).
+crossfader_ui_apply = 0x4006269a; // type:code region:image // UI crossfader-move handler: pos = 127 - byte, stored at 0x460d16c8, then builds fader_levels (0x80003c60) coefficient pairs from the fade curve xfader_curve_table (0x400bcd90) indexed by pos — each long = (0x8000 - curve : curve), i.e. (B-weight, A-weight).
+xfader_curve_table = 0x400bcd90; // type:data region:image // crossfader fade-curve, one 16-bit weight per position; read `movew %a1@(0,pos:l:2)` by crossfader_ui_apply to build fader_levels.
+arranger_advance = 0x4004a668; // type:func region:image // the arranger row-advance, called from seq_isr (jsr 0x4004a668 at seq ISR). Gated on arranger_active (0x800066a0 == 1). Holds current row in arranger_cur_row (0x80006698). Rows live in the arranger object (arranger_object 0x10000004, pointer at NVRAM 0x10000000): ROW n = obj+20 + n*22 (see arranger_object for the field map); the byte the advance tests at obj@(14+n*22) is row_n-6. Decrements the per-row repeat countdown arranger_repeat_left (0x800066a4); when it hits 0 it walks to the next/loop-target row (loop counters base 0x80006690) and falls into arranger_goto.
+arranger_goto = 0x4004a5c0; // type:code region:image // inside/above arranger_advance: reads the selected row's fields and calls seq_goto_pattern (0x400a0570). Its a0 = obj + n*22 (rows-at-+20 convention, a1 = a0+20 = the row): pattern = row+1 as two nibbles (bank = >>4, pat = &15), repeat seeded from row+2, OF u16 from row+10, Ln u16 from row+12 (clamped >=2); writes chain/loop scratch 0x80006908 and 0x800066a4 (repeat), sets bit 3 of 0x80006904 (arranger-changed flag). Per-pattern tempo/length pulled from the bank blob trailer region 0x400eb038 + pattern*0x8ed8.
+arranger_object = 0x10000004; // type:data region:nvram // THE arrangement, in battery NVRAM (pointer to it at 0x10000000): header +16 u16 (reads 1), +18 u16 ROW COUNT (arranger_row_editor increments it at insert, movew a2@(18)); rows at +20, 22 bytes each, 48 cap. Row fields: +0 row TYPE (0 = pattern row; turning the PAT column below A01 selects specials — 2 displays 'REM:'), +1 pattern byte (bank<<4|pat: A02 -> 0x01 measured), +2 repeat (display REP = byte+1), +8/+9 scene A/B (0xff = none; byte = display-1), +10 u16 OF start offset, +12 u16 Ln row length in steps (default 0x10 = the displayed 016). +3..7/+14..21 not yet attributed (M column, loop target/count for LOOP rows). Editing: ARR -> YES opens the ARRANGEMENT EDITOR, FUNC+DOWN inserts a row, LEFT/RIGHT pick the column, ENC7 (the LEVEL knob, emulator encoder index 6) changes the value. Persistence: arr01..arr08.work/.strd on the card (11336 B, FORM/DPS1/ARRA container) — one file per arrangement slot.
+arranger_row_editor = 0x4009e560; // type:func region:image // arranger row insert/shift editor: rows are 22 bytes (lea %a0@(22); moveq #22 * mulsl), object has row count at obj+18 and the row array at obj+14; uses pd_memcpy (0x40020898) to shift rows; enforces a 48-row cap (error path pea 0x30 / pea "ROW" 0x400b94ab / jsr 0x4005a2b8).
+arranger_loop_counters = 0x80006690; // type:data region:sram // per-row loop/repeat-remaining counters (u16, indexed row+36 in arranger_advance's rescan)
+arranger_cur_row = 0x80006698; // type:data region:sram // current arranger row index (u32); read at 0x4004a692
+arranger_pending_row = 0x8000669c; // type:data region:sram // pending/next row (i32, -1 = none); 0x4004a6bc/0x4004a6ca
+arranger_active = 0x800066a0; // type:data region:sram // arranger-mode active flag (== 1 to advance); 0x4004a678
+arranger_repeat_left = 0x800066a4; // type:data region:sram // repeat/hold countdown for the current row; 0x4004a6a8, seeded from row+2 (rows-at-+20 convention) in arranger_goto
+arranger_chain_scratch = 0x80006908; // type:data region:sram // chain/length word written by arranger_goto from the per-pattern trailer (0x4004a5c6/0x4004a5fe)
+
+# ---- LFO engine ----
+lfo_engine = 0x4000cf40; // type:code region:image // inside frame_isr: the LFO evaluator/apply block (0x4000cf40-0x4000d08a). Setup: a2 = lfo_param_base + track offset (sp@(128)), a3 = lfo_state, a4 = 0x80004890, a5 = alternate target block (sp@(94)+0x800002b8). Per LFO: phase step = SPD(mvsw a2@(c,d2:l:2)) x acc3 x #8657 accumulated into a3@(24) MOD 496125 (0x791fd), wrap count <<= MULT (mvzb a2@(24,d2:l)); WAVE byte (mvsb a2@(21,d2:l)) indexes lfo_wave_table and jsr's the shape handler; the apply (0x4000d03e-0x4000d07a) MACs the depth-scaled value into the TARGET word (target idx mvsb a2@(1e,d2:l), <12 -> the DSP record via a0=a2record, >=12 -> the a5 block) with satsl saturation and movew back. ☠ The LFO writes the RECORD, downstream of the voice working buffer — the voice-wb copy of the target keeps its knob value while the record oscillates, so a watch on the snapshot or voice-wb never sees it
+lfo_param_base = 0x80000660; // type:data region:sram // per-track LFO page parameter block (a2 of lfo_engine): per-LFO indexed reads at +0x0c (SPD, word idx*2), +0x12 (DEP, word idx*2), +0x15+idx (WAVE byte), +0x18+idx (MULT byte, used as a left-shift), +0x1e+idx (TARGET param index)
+lfo_state = 0x8000136c; // type:data region:sram // per-LFO runtime state, 28 B each (a3 of lfo_engine, walked across the three LFOs of each track): +0 coarse position (climbs steadily, live-read), +4/+8 current output value pair, +16/+20 rate constants (0x012d3d2d / SPD-derived word observed), +24 the fine phase accumulator advanced mod 496125 per block
+lfo_wave_table = 0x400d6210; // type:data size:0x80 region:image // 32 LFO shape handlers jsr'd by lfo_engine for AUDIO tracks, indexed by the WAVE byte (read from image, all 32): [0..10] shapes 0x4000385c 0x40003888 0x400038bc 0x400038cc 0x400038dc 0x40003910 0x40003944 0x40003990 0x400039dc 0x40003a04 0x40003a30, [11..18] = lfo_designer_handler x8 (one per designable slot), [19..31] = 0x400038bc filler. ☠ Entry 7 (0x40003990) is a SHAPE (trig -> -8M then exponential decay toward 0 by value*rate>>20), NOT the designer — the designer is 0x40003a90
+lfo_wave_table_midi = 0x400d6290; // type:data size:0x80 region:image // the MIDI-track twin of lfo_wave_table, same 11 shapes; entries [11..18] = lfo_designer_handler_midi (0x40003b10) x8 (words at 0x400d62bc..0x400d62d8, read from image)
+lfo_wave_tri = 0x4000385c; // type:func region:image // WAVE handler 0 (TRI, the measured default); shape siblings at 0x40003888..0x40003a30 per lfo_wave_table
+lfo_designer_handler = 0x40003a90; // type:func region:image // the LFO DESIGNER waveform handler (audio tracks, lfo_wave_table[11..18]): step = phase>>19 & 15 (16 steps per cycle), reads the live 16-byte custom wave at lfo_designer_live_waves + LFOIDX*16 (LFOIDX = lfo_engine's loop counter, taken from sp@(20)) and the per-step interp mask word at lfo_designer_live_masks + LFOIDX*2 — mask bit SET: output = lerp(wave[step], wave[step+1&15]) by phase&0x7ffff (>>3 scale); bit CLEAR: output = wave[step]<<16
+lfo_designer_handler_midi = 0x40003b10; // type:func region:image // MIDI-track designer twin (lfo_wave_table_midi[11..18]): same 16-step body, wave bytes at 0x46c7738c + LFOIDX*16, interp mask word at 0x46c76dc0 + (LFOIDX+934)*2 = 0x46c7750c + LFOIDX*2 (inside the midi_track_live_cfg region)
+lfo_designer_live_waves = 0x80001388; // type:data size:0x180 region:sram // LIVE per-LFO custom waveforms, 24 slots (8 tracks x 3 LFOs) x 16 signed bytes; read by lfo_designer_handler, FILLED by the part-apply publisher (0x40009b4c 16-byte copy loop) from the bank-blob design store when an LFO's WAVE byte selects a design (wave > 10: source = blob part + 0x1702 + (wave-11)*16). All zero on out/fx2 (nothing designed) — read live
+lfo_designer_live_masks = 0x80001508; // type:data size:0x30 region:sram // LIVE per-LFO interp masks, 24 x u16 (bit per step); publisher source = blob part + 0x1782 + (wave-11)*2 (movew at 0x40009b6e, base 2*295553 = blob+0x90502)
+lfo_setup_cursor = 0x460d1a32; // type:data region:sdram // LFO SETUP list cursor (0..2 = LFO 1..3, 3 = the DESIGN row — read 3 live with DESIGN selected); the designer UI computes its live slot as cur_track*3 + [this] (0x4003944e)
+lfo_trig_mode_records = 0x80006184; // type:data size:0x100 region:sram // 16-byte LFO trig-mode records lfo_engine indexes by the byte at lfo_param_base+27+idx (<<4, +8 records when the bit at [0x80006284 + mode*4] matches the track's a4 byte): +0/+4/+8 three longs (phase masks/limits), +12..15 four bytes feeding the handler-arg/phase-store logic (0x4000cf88-0x4000d030)
+
+# ---- MIDI config gates ----
+midi_sync_flags = 0x80000028; // type:data region:sram // MIDI sync flags, per-bit proven: bit0=CLOCK RECEIVE (midi_clock_rx step-traced live taking the branch both ways on an injected 0xF8), bit1=CLOCK SEND (poked alone -> PLAY emits a pure 0xF8 stream to the host endpoint, no 0xFA)
+midi_transport_receive = 0x80000029; // type:data region:sram // TRANSPORT RECEIVE byte: midi_start_rx tstb's it at 0x4000a276 — step-traced live falling through at 1 and branching out at 0 on an injected 0xFA
+midi_transport_send = 0x8000002a; // type:data region:sram // TRANSPORT SEND byte: poked alone (sync flags 0) -> PLAY emits 0xFA and STOP 0xFC to the host endpoint with zero 0xF8 between them
+
+# ---- MIDI sequencer layer ----
+midi_uart0_isr = 0x400106ec; // type:func region:image // UART0 (MIDI DIN) interrupt handler, vector 0x5a: RX reads URB 0xfc06000c — an 0xF8 first timestamps DTCN0 into midi_clock_interval — then calls [midi_rx_callback_ptr]; TX drains the priority ring before the normal ring (read; RX side corroborated live by midi_rx_fifo_head advancing once per injected byte)
+midi_rx_callback_ptr = 0x460ba97c; // type:data region:sdram // per-RX-byte callback pointer the UART0 ISR calls; midi_uart0_init stores midi_rx_callback here
+midi_rx_fifo_head = 0x46100b80; // type:data region:sdram // RX FIFO write index — increments once per byte received on the DIN port (measured live per injected byte; the cheap "did my byte reach the guest at all" observable)
+midi_rx_fifo_tail = 0x46100b78; // type:data region:sdram // RX FIFO read index (midi_parser side)
+midi_rx_fifo_depth = 0x46100b7c; // type:data region:sdram // RX FIFO fill count between the UART0 ISR and midi_parser
+midi_in_task = 0x40005540; // type:func region:image // MIDI input task: blocking-dequeues parsed messages and dispatches on the status nibble — proven live end to end by breakpoints on the handlers below firing per injected message
+midi_system = 0x40001900; // type:func region:image // 0xFn second-level dispatcher through midi_system_dispatch (breakpoint fires live on an injected 0xF8)
+midi_system_dispatch = 0x400d2d98; // type:data size:0x40 region:image // 16-entry 0xFn table indexed by status&15: [8]->midi_clock_rx and [10]->midi_start_rx proven live by injected F8/FA breakpoint hits; [0]=sysex 0x40001918 [2]=spp 0x4000a350 [11]=continue 0x4000a200 [12]=stop 0x4000a1e0 [14]=active-sense 0x400019d8 (table words read)
+midi_clock_rx = 0x40005a48; // type:func region:image // 0xF8 handler: gated on midi_sync_flags bit0 (step-traced both ways live), sets midi_ext_sync_active, forces the sequencer tick (INTFRCH0 source 32), runs the tempo estimator over midi_clock_ring
+midi_start_rx = 0x4000a274; // type:func region:image // 0xFA handler: gated on midi_transport_receive (step-traced both ways live); with CLOCK RECEIVE also set it sets midi_awaiting_first_clock
+midi_awaiting_first_clock = 0x46104ce8; // type:data region:sdram // set by Start/Continue when CLOCK RECEIVE is on; cleared by the first 0xF8 (read at 0x4000a28e / 0x40005a7a)
+midi_ext_sync_active = 0x46104ca8; // type:data region:sdram // nonzero while following external clock; written by midi_clock_rx 5 instructions in (watched live) — ☠ transient, cleared again by the clock-loss path, so poll reads can miss it
+midi_clock_interval = 0x46c83466; // type:data region:sdram // DTCN0 delta between consecutive 0xF8 bytes, stamped in midi_uart0_isr before queueing latency (prev stamp 0x46c8345a) — ☠ reads 0 in the emulator: the board's DTIM0 counter does not advance, so external-tempo estimation measures nothing here
+midi_tempo_estimate_x24 = 0x46104d96; // type:data region:sdram // external tempo in BPMx24 = count*21168000/(sum>>5) over the interval ring; 21168000*32 = 677376000 = 24*60*T0IN/60 fixes the timebase at T0IN = 256*44100 = 11.2896 MHz exactly; clamped 600..7320 (720..7200 on the warmup path); copied to 0x80001818
+midi_clock_ring = 0x46104daa; // type:data size:0x60 region:sdram // 24-long ring of the last F8 intervals; running sum 0x46104da2, index 0x46104da6, fill count 0x46104d9a (read at 0x40005b00..0x40005b4c)
+midi_routing_rebuild = 0x40001854; // type:func region:image // rebuilds midi_channel_mask from config: audio TRIG CHs (0x8000003f), AUTO channel (0x80000047), and the per-part MIDI-track channel bytes at [seq_bank_base_ptr]+cur_part*6322+0x8f262+track*0x24 — that addressing live-verified: poking the track-1 byte to 1 and injecting one note set mask bit 16 of channel 1
+midi_channel_mask = 0x46c7febe; // type:data size:0x40 region:sdram // 16 longs, one per channel: bits 0-7 audio tracks (TRIG CH), bit 8 AUTO, bits 16-23 MIDI tracks (live read on out/fx2: channels 1-8 carry bits 0-7, channel 11 carries bit 8, MIDI-track bits appear when a channel is configured)
+midi_trig_ch_base = 0x8000003f; // type:data size:0x8 region:sram // MIDI TRIG CH per audio track, 0-based channel, -1=OFF (live read 00..07 = channels 1-8)
+midi_auto_channel = 0x80000047; // type:data region:sram // AUTO channel, 0-based, -1=OFF (live read 0x0a = channel 11, matching mask bit 8 in slot 10)
+midi_track_live_cfg = 0x46c76dc0; // type:data size:0x220 region:sdram // 8 x 0x44-byte live MIDI-track blocks: +0x00 the NOTE-page params (note 0x30, vel 0x64, len, NOT2-4 centered 0x40...), +0x20 a mirror of the stored per-part 0x24-byte config — +0x20 = channel byte (0=OFF, else the displayed channel; the emitter reads it here), +0x21/0x22 bank/prog (0x80=OFF), CC assignments observed 01 02 0a 47 48 49 4a 4b 4c at +0x34..
+midi_track_note_staging = 0x46c76fe0; // type:data size:0x100 region:sdram // 8 x 0x20 per-track note-event staging the emitter reads: +0 note, +1 velocity, +3/+4/+5 NOT2-4 as signed-64 offsets on the base note, +0xc scale/transpose input
+midi_note_emitter = 0x4009f794; // type:func region:image // the per-tick MIDI-track emitter — proven live: a grid trig on MIDI track 1 (channel poked to 1) sends 90 30 64 then running-status 90 30 00 every pattern loop through the DIN bridge; builds channel status bytes into the midi_msg_staging area, quantizes via midi_scale_corr_table, tracks notes in the pending/held tables and midi_chan_note_bitmap
+midi_msg_staging = 0x400d807c; // type:data size:0x10 region:image // the emitter's outbound 3-byte message staging: +0 note-on (0x90|ch n v), +3 note-off, +6 CC (0xB0|ch), +11 chan-press (0xD0|ch), +13 pitch-bend (0xE0|ch) — status bytes written per-track each tick, then pea'd into midi_send
+midi_scale_corr_table = 0x400d80a0; // type:data size:0x30 region:image // 12 longs indexed by (note+offset) mod 12 — the key/scale quantizer correction the emitter adds before sending
+midi_sent_note_map = 0x46c78152; // type:data size:0x800 region:sdram // byte per (ch<<7)+note: which MIDI track (bit0-3, |flags) currently sounds that note, 0xff=none — written by the emitter at send, consulted by midi_note_on's echo path
+midi_pending_note_tbl = 0x46c77a16; // type:data size:0x100 region:sdram // 8 tracks x 4 slots x 8 bytes {status long @+0, note long @+4}, -1=free — notes awaiting their off, drained into note-off sends by the emitter
+midi_held_note_tbl = 0x46c7a1a0; // type:data size:0x100 region:sdram // same layout as midi_pending_note_tbl; the hold stage's note-offs are emitted from here. ☠ Entries are 8 bytes, 4 slots per track
+midi_chan_note_bitmap = 0x46c79eba; // type:data size:0x100 region:sdram // 16 channels x 128 bits: which notes the Octatrack currently sounds per channel; set on send (bit (note&31) of long [ch*4 + note>>5]), cleared on note-off
+audio_note_in_mode = 0x8000004b; // type:data region:sram // AUDIO NOTE IN mode byte: 0=off (note-on exits at 0x4000e352), 1=STANDARD — an octave jump table at 0x4000e452/0x4000e468: notes 0-23 nothing, 24-31 a per-track action via 0x4009b290 (unmeasured), 36+t TRIGS TRACK t+1 at default pitch — measured: injected note 36 on channel 1 returns the reference SINE440 burst (440 Hz, peak 2893) while notes 5/24/38/48/60 stay silent; modes 2/3 take the mask-driven per-track paths
+audio_note_in_gate = 0x80000012; // type:data region:sram // long returned by 0x40033970; gates the AUTO-channel note path (and mode 2) in midi_note_on at 0x4000e178
+midi_note_state = 0x46c803d6; // type:data size:0x2000 region:sdram // long per (ch<<7)+note, -1 empty; note-on stamps [0x46c7a19c] into it and bumps midi_chan_note_count
+midi_chan_note_count = 0x46c7fe4c; // type:data size:0x40 region:sdram // 16 longs: sounding-note count per channel (incremented at 0x4000e084)
+
+# ---- USB DISK MODE runtime details ----
+usb_diskmode_active = 0x460e76a0; // type:data region:sdram // 1 while USB DISK MODE is active (set at 0x4007eb8c by the deferred enter), 0 outside; live-verified across the PROJ->DOWN->RIGHT->YES entry gesture
+
+# ---- USB control stack + the dormant USB-MIDI block ----
+# ☠ This code region uses ISA_C `byterev` (opcode 0x02c0|Dn) — m68k:cfv4e
+# binutils shows it as `.short 0x02c0`; disassemble USB code with -m
+# m68k:isa-c. The LIVE setup reader executes byterev on real hardware today
+# (MSC works), and QEMU decodes it (CF_ISA_APLUSC), so both sides are safe.
+# Reachability method: every 32-bit absolute word scanned, plus every
+# jsr %pc@(d16), bsr.w/bsr.s, lea/pea %pc@(d16) in the image decoded and
+# its target computed. "ZERO refs" below means none of those reach it.
+usb_ep_qh_base = 0x4ec94800; // type:data region:sdram // the EPLISTADDR endpoint-list: 0x40-byte dQH per EP direction — EP0 OUT +0, EP0 IN +0x40, EP1 OUT +0x80, EP1 IN +0xC0, EP2 OUT +0x100, EP2 IN +0x140
+usb_qh_ep0out_ptr = 0x46c8ce18; // type:data region:sdram // pointer to the EP0 OUT dQH (setup packets land in its +0x28 buffer)
+usb_qh_ep0in_ptr = 0x46c8ce10; // type:data region:sdram // pointer to the EP0 IN dQH
+usb_qh_ep2out_ptr = 0x46c8ce14; // type:data region:sdram // pointer to the EP2 OUT dQH — written only by the dormant usb_midi_ep2_init
+usb_qh_ep2in_ptr = 0x46c8ce1c; // type:data region:sdram // pointer to the EP2 IN dQH — written only by the dormant usb_midi_ep2_init
+usb_setup_pkt = 0x46c8ce08; // type:data size:0x8 region:sdram // the last SETUP packet, byterev'd out of the EP0 OUT dQH by usb_setup_read
+usb_setup_read = 0x4001d5d4; // type:func region:image // LIVE setup-packet reader: SUTW tripwire dance (USBCMD bit13) around byterev'd reads of dQH+0x28/+0x2c into usb_setup_pkt; called from usb_isr 0x4001e614
+usb_ep0_send = 0x4001d498; // type:func region:image // LIVE EP0 IN transmit(len, buf): builds the dTD at 0x4ec95020, links it into [usb_qh_ep0in_ptr], primes PETB0; callers 0x4001d874/0x4001d8b2 (config descriptors) and 0x4001de5c
+usb_cfg_desc_send = 0x4001d858; // type:code region:image // GET_DESCRIPTOR(CONFIG) responder: len = min(wLength, 32) — ☠ the 32 is a hardcoded moveq, NOT read from the table — picks 0x400e201c (FS) or 0x400e203c (HS) by PORTSC1 speed, jsr usb_ep0_send; the other-speed twin at 0x4001d896 clamps to 32 the same way. A grown config descriptor needs BOTH clamps and the fixup changed
+usb_isr_state = 0x460bb3ec; // type:data region:sdram // the usb_isr state machine variable (observed states 4, 10, 11, 15)
+usb_ep0_td_ptr = 0x460bb3f0; // type:data region:sdram // the in-flight EP0 IN dTD pointer the ISR polls for completion
+usb_desc_device = 0x400e2000; // type:data size:0x12 region:image // device descriptor: bcdUSB 2.00, idVendor 0x1935 (Elektron), idProduct 0x0002, 1 configuration; served at 0x4001d82c
+usb_desc_qualifier = 0x400e2012; // type:data size:0xa region:image // device qualifier, served at 0x4001d842
+usb_desc_cfg_fs = 0x400e201c; // type:data size:0x20 region:image // full-speed config: 1 interface (class 08/06/50 = MSC/SCSI/BOT), EP 0x81 + 0x01 bulk 64; wTotalLength written 32 by usb_descriptor_fixup; ☠ bNumInterfaces at +4 = 0x400e2020 — the byte that hides the USB-MIDI block
+usb_desc_cfg_hs = 0x400e203c; // type:data size:0x20 region:image // high-speed config, same shape with 512-byte EPs; bNumInterfaces at 0x400e2040
+usb_desc_cfg_os_fs = 0x400e205c; // type:data size:0x20 region:image // other-speed config (type 7), 64-byte EPs; served at 0x4001d8c6
+usb_desc_cfg_os_hs = 0x400e207c; // type:data size:0x20 region:image // other-speed config (type 7), 512-byte EPs; served at 0x4001d8be
+usb_desc_strings = 0x400e209c; // type:data region:image // string descriptors: langid 0x0409, "Elektron Music Machines", product, serial; lengths boot-patched by usb_descriptor_fixup
+# -- the dormant USB-MIDI half. ZERO references of any kind reach these six;
+#    they are complete, assembled, correct-looking code with no callers. --
+usb_midi_ep2_init = 0x4001d0e4; // type:func region:image // DORMANT: fills the EP2 dQHs (usb_ep_qh_base+0x100/+0x140, 64-byte max packet), ENDPTCTRL2 := 0x00C800C8 (bulk + enabled both directions), then primes a 64-byte EP2 OUT receive into usb_midi_rx_buf (dTD 0x4ec953e0, ENDPTPRIME |= PERB2)
+usb_midi_ep2_disable = 0x4001d174; // type:func region:image // DORMANT: ENDPTCTRL2 := 0, then writes 4 to ENDPTPRIME (☠ that primes EP2 OUT rather than flushing — 0xFC0B01B4 ENDPTFLUSH is probably what was meant)
+usb_midi_rx_prime = 0x4001d184; // type:func region:image // DORMANT: re-arms EP2 OUT with a caller-supplied 64-byte buffer (dTD 0x4ec953e0, IOC|ACTIVE, prime PERB2)
+usb_midi_ep2_send = 0x4001d1c0; // type:func region:image // DORMANT: raw EP2 IN transmit(len, buf): dTD 0x4ec952c0, token len<<16|IOC|ACTIVE, prime PETB2 (ENDPTPRIME bit 18)
+usb_midi_encoder = 0x4001d204; // type:func region:image // DORMANT, and the heart of the block: encode(len, rawbuf) walks raw MIDI bytes into 4-byte USB-MIDI event packets at usb_midi_tx_buf — correct CINs (channel voice = status>>4, F2=3, F3=2, F6=5, SysEx spans 4/5/6/7, realtime 0xF), TX running-status memory at usb_midi_tx_runstat — then primes the whole packet list out EP2 IN. The TX direction is COMPLETE; no RX decoder (USB-MIDI packets -> raw MIDI bytes) exists anywhere in the image
+usb_port_speed = 0x4001d418; // type:func region:image // returns PORTSC1>>26 & 3 (port speed); dormant duplicate of the inline speed checks the descriptor responder uses
+usb_midi_setup_read = 0x4001d42c; // type:func region:image // DORMANT duplicate of usb_setup_read (same SUTW + byterev dance)
+usb_ep0_status_in = 0x4001d524; // type:func region:image // DORMANT duplicate: zero-length EP0 IN status (the live stack inlines the same dTD setup at 0x4001d8e4)
+usb_midi_tx_buf = 0x4ecc8000; // type:data region:sdram // the encoder's USB-MIDI event-packet staging buffer (EP2 IN payload); 0x1000 bytes before usb_midi_rx_buf, which bounds the TX coalescing accumulator (custom/usb-midi.py TX_CAP=256 raw -> <=1024 encoded)
+usb_midi_rx_buf = 0x4ecc9000; // type:data region:sdram // the 64-byte EP2 OUT receive buffer usb_midi_ep2_init primes; nothing ever reads it — the missing RX half
+usb_midi_tx_runstat = 0x460bb419; // type:data region:sdram // the encoder's TX running-status memory (persists across encode calls)
+usb_setcfg_body = 0x4001d972; // type:code region:image // the REAL SET_CONFIGURATION handler body: reached by the bnew at 0x4001d8da (the 0x4001d8ce entry falls through to the EP1 prime at 0x4001d968 only for a different request); primes EP0 IN status, posts the MSC-task wakeup. custom/usb-midi.py hooks 0x4001d9ca here to bring EP2 up — verified by breakpoint, not by reading
+usb_clear_feature_ep = 0x4001daec; // type:code region:image // CLEAR_FEATURE(ENDPOINT_HALT) handler: masks wIndex&0x7f and accepts ONLY endpoint 1 (cmpl #1 at 0x4001dafe), clearing the stall bit in ENDPTCTRL1 (0xfc0b01c4) for 0x81 vs 0x01; every other endpoint STALLs. custom/usb-midi.py hooks it to also ACK EP2. Stock GET_STATUS(device) here-adjacent returns wire bytes 00 01 (a shipped quirk, left as-is)
+usb_diskmode_action = 0x40063718; // type:code region:image // the PROJECT-menu item action for USB DISK MODE: tstl arg, arg==0 -> jmp the prepare 0x4007eb34, which enqueues the deferred enter (callback 0x4007ebd4 parked at 0x460e76a6, message via queue 0x460d17ce) and posts the WAIT string
+
+# ---- USB control handlers the USB-audio patch hooks ----
+usb_set_interface_handler = 0x4001dd04; // type:code region:image // SET_INTERFACE (request 0x0b): stock IGNORES wIndex/wValue, unconditionally enables EP1 (ENDPTCTRL1 0xfc0b01c4 |= 0x00400040) and ACKs via braw 0x4001de74. custom/usb-audio.py hooks it (displaced movel 0xfc0b01c4,%d0) to handle interface 3 (AudioStreaming): alt 1 brings EP3 iso up + sets the tap stream flag, alt 0 tears it down; other interfaces fall through to stock at 0x4001dd0a
+usb_get_interface_handler = 0x4001d824; // type:code region:image // GET_INTERFACE (request 0x0a): stock pea's the 1-byte const 0 at 0x400e20a1 and sends via 0x4001d81e. custom/usb-audio.py hooks it (displaced pea) to report interface 3's live alt setting
+usb_control_done = 0x4001de74; // type:code region:image // control-request-done tail the handlers braw to after servicing a request
+usb_setup_wvalue = 0x46c8ce0a; // type:data region:sdram // SETUP wValue low byte in usb_setup_pkt (SET_INTERFACE alt setting); wValue = (0x46c8ce0b<<8)|this
+usb_setup_windex = 0x46c8ce0c; // type:data region:sdram // SETUP wIndex low byte (interface number for SET/GET_INTERFACE); the clrfeat/audio shims byterev+swap it to host order
+# ---- filesystem read ABI (fs_api_vtable 0x46c823fa), used by custom/coldfire/usb-audio-tramp.s to load /USBAUDIO.BIN ----
+fs_vtable_open = 0x46c8242a; // type:data region:sdram // fs vtable +0x30: open(path, mode) -> fid (-1 fail); leading-slash paths resolve to card root (factory_os_handler opens "/octatrack_factory_os.bin", os_upgrade_stage/fs_copy_file use this ABI)
+fs_vtable_size = 0x46c8241e; // type:data region:sdram // fs vtable +0x24: size(fid) -> byte length
+fs_vtable_read = 0x46c82426; // type:data region:sdram // fs vtable +0x2c: read(fid, buf, nsectors) -> sectors read. ☠ the count is in 512-byte SECTORS, not bytes (fs_copy_file/os_upgrade_stage both pass sector counts)
+fs_vtable_close = 0x46c82422; // type:data region:sdram // fs vtable +0x28: close(fid)
+
+# ---- bank-blob PART record interior ----
+pd_part_lfo_setup = 0x40171255; // type:data region:sdram // part+0x2f5: per-track stored LFO SETUP page, 30 bytes/track (the designer-publish sites walk it as d*30 reading WAVE bytes; blob-relative 0x8f075 at 0x40025ea4/0x40038396)
+pd_part_midi_cfg = 0x40171442; // type:data region:sdram // part+0x4e2: per-track MIDI-track config, 0x24 bytes/track (addressed as [seq_bank_base_ptr]+part*6322+0x8f262+track*0x24): +0 channel, +1/+2 bank/prog (0x80 = OFF), +0x14.. the CC assignments (01 02 0a 47 48 49 4a 4b 4c)
+pd_part_designer_waves = 0x40172662; // type:data region:sdram // part+0x1702: STORED LFO-designer waveforms, 16 signed bytes per design slot; the part-apply publisher copies slot (wave-11) into lfo_designer_live_waves (16-byte copy loop 0x40009b4c). RANDOMIZE on the DESIGN row of track 1 wrote 16 random bytes into slot 1 (+0x10) — measured live, twice with different random bytes
+pd_part_designer_masks = 0x40172702; // type:data region:sdram // part+0x1782: stored per-design interp masks, u16 each (publisher movew at 0x40009b6e, blob+0x90502+(wave-11)*2)
+pd_part_arp_step_masks = 0x40172742; // type:data region:sdram // part+0x17e2: per-MIDI-track custom-arp STEP masks, u16 each (arp_tick btst's the current step index against it at 0x40099fda: blob word addressing 2*(295633 + part*3161 + bank*317856 + track), bit CLEAR = rest)
+pd_part_arp_offsets = 0x40172792; // type:data region:sdram // part+0x1832: per-MIDI-track custom-arp per-step NOTE OFFSETS, 16 signed bytes per track (arp_tick mvsb at 0x4009a2e4: blob + bank*0x9b340 + part*6322 + track*16 + 0x905b2, indexed by the current step); final note = pool note + this offset + 12*range_pass
+
+# ---- MIDI arpeggiator ----
+arp_pool_builder = 0x40099c08; // type:func region:image // build/reset the arp note pool for a track (args: track sp@(48), note-list ptr sp@(52)): resets the 10-byte arp state record, dedups incoming notes against the 128-bit bitmap arp_note_bitmap, appends into the three per-track pool arrays (ascending 0x46c775d2, descending-order 0x46c77d32, raw 0x46c7a2a0, 132 B/track each)
+arp_tick = 0x40099ee4; // type:func region:image // the per-tick arp step engine (args: track sp@(40), 4-byte note-out sp@(44)): speed divider vs staging+0xf, advances the step counter in arp_state, tests the step bit in pd_part_arp_step_masks, picks the pool note by MODE (jump table 0x4009a1a4, 6 arms: up/down/two shared/shuffle-swap/random — both random arms use the Numerical-Recipes LCG x*1664525+1013904223 seeded at arp_lcg_seed), adds the per-step offset from pd_part_arp_offsets + 12 semitones x the octave pass (x12 at 0x4009a2f0), emits note or -1 (rest) into the out buffer
+arp_state = 0x46c77b16; // type:data size:0x50 region:sdram // per-MIDI-track 10-byte arp runtime record: +0 speed-divider counter, +1 current step index (the mask/offset index), +4 octave/range pass counter (vs staging+0x10), +6 note-length countdown (from midi_track_live_cfg+0x2e), +8 rebuild-request flag (tested 1 at arp_pool_builder entry), +9 hold flag
+arp_note_bitmap = 0x46c7a8b4; // type:data size:0x80 region:sdram // per-track 128-bit note-membership bitmap (16 B/track) the pool builder dedups against
+arp_lcg_seed = 0x46c77388; // type:data region:sdram // the arp's LCG state (x' = x*1664525 + 1013904223), stepped by the two random mode arms
+arp_dirty_flag = 0x46c7a872; // type:data region:sdram // set 1 by arp_tick on step-wrap/teardown events (0x40099f88/0x40099f94/0x4009a324)
+
+# ---- AED (audio editor) UI ----
+aed_ctx_ptr = 0x460e5e4c; // type:data region:sdram // pointer to the AED context object (reads 0x46c7d34c live in AED); zero when the editor is closed (the tab-cycle code tstl's it)
+aed_tab_index = 0x460e5e5c; // type:data region:sdram // current AED tab 0..4 (TRIM/SLICE/EDIT/ATTR/FILE): the tab-bar renderer compares its loop counter against it for the highlight (0x4006e0d2); poking it re-renders the poked tab (measured — the refresh loop reads it every frame)
+aed_tab_strings = 0x400b2bdc; // type:data size:0x14 region:image // the 5 tab-label string pointers (TRIM 0x400b68a8, SLICE 0x400b6c6e, EDIT, ATTR 0x400b68ad, FILE), read by the tab-bar renderer at 0x4006e080
+
+
+# ---- MIDI-track page params + publishers ----
+pd_part_midi_page_params = 0x40171342; // type:data region:sdram // part+0x3e2: STORED per-MIDI-track page parameters, 0x20 bytes/track (NOTE page + ARP page): +0 NOTE, +1 VEL, +3..5 NOT2-4, +0x0e ARP MODE (0=OFF, 1..6 = the order arms), +0x0f/+0x10 ARP SPD/RNGE region. The apply publisher (0x400a1b02 in the seq-ISR region) copies this into midi_track_live_cfg — so this record, not the live copy, is what a configured arp must be written into (a live poke is wiped on the next apply, measured)
+midi_track_page_publisher = 0x400a1b02; // type:code region:image // inside the seq-ISR region: copies pd_part_midi_page_params + the 0x24-byte midi cfg mirror into midi_track_live_cfg per track (the PC a write-watch on live MODE caught: 0x400a1b2c)
+midi_track_staging_refresher = 0x40003dc4; // type:func region:image // per-tick copy of midi_track_live_cfg[0..0x1f] into midi_track_note_staging (moveml pairs, 0x44 -> 0x20 stride); the LFO-modulation writer at 0x40003fca then overlays modulated values — the reason staging pokes vanish within a tick
+arp_note_len_reload_src = 0x46c76dee; // type:data region:sdram // midi_track_live_cfg+0x2e (+track*0x44): the note-length value arp_tick reloads the +6 countdown from; 0x7f = hold forever (the decrementer at 0x4009a30a skips 0x7f)
+
+# ---- AED continued (tab machinery; the tab gesture and availability) ----
+aed_tab_advance = 0x4006dd18; // type:func region:image // cycle the AED tab: loops the index past tabs whose availability callback declines, then runs the new tab's view-init from aed_tab_view_table; reached from the TRACK-key handler on a state-3 (double-tap) event of the CURRENT track's key while AED is open (0x40083b72)
+aed_tab_view_table = 0x400b2b64; // type:data size:0x14 region:image // per-tab view-init handlers: TRIM 0x4006f9e4, SLICE 0x40071ba4, EDIT 0x400744ac, ATTR 0x4006e954, FILE 0x40076e68
+aed_tab_avail = 0x4006db58; // type:func region:image // avail(tab): jump table — TRIM/SLICE test [aed_sample_state] <= 3, EDIT/ATTR/FILE dispatch on its exact value
+aed_sample_state = 0x46c8d1a0; // type:data region:sdram // the AED sample-state variable the tab availability dispatches on (values 1..4 observed in the compares; semantics unmapped)
+key_double_tap_classifier = 0x40040250; // type:func region:image // key-event preprocessor: a key-down whose id matches the latch (0x400c0aac) within 14 ticks of the 61 Hz timer (0x460d5de0) is converted to state 3 (double-tap) before dispatch; a state-2 event resets the latch to -1. TRACK-key state 3 in AED = tab advance; with a recorder context ([0x460e70e0]) it instead opens RECORDING SETUP
+key_double_latch = 0x400c0aac; // type:data region:image // last key-down id for the double-tap classifier (-1 = none); ☠ image-resident variable (the firmware keeps mutable state inside the image range)
+key_double_timer = 0x460d5de0; // type:data region:sdram // ticks since the latch was set; 61/s measured live; window <= 14
+
+# ---- cache setup ----
+boot_cache_enable = 0x4001fc44; // type:code region:image // inside k_boot_task_entry: CACR := 0xa50ce100 (movec at 0x4001fc4a) then ACR0 := 0x4007e020 (0x4001fc54) — the only runtime cache enable. Data cache is OFF until this runs; data DEFAULT mode is cache-inhibited-precise. ACR0 covers ONLY 0x40000000-0x47ffffff, and ACR2/ACR3 (instruction) are never programmed anywhere, so instruction fetches are cacheable EVERYWHERE incl. the 0x48000000+ scratch region — a patch there must invalidate the IC before jumping in
+ctx_switch_cacr = 0x40000596; // type:code region:image // pit0_ctx_switch epilogue: CACR := 0xa40ce000 (movec at 0x4000059c) before the rte — branch-cache invalidate on every context switch, IC/DC untouched. 0xa40ce000 is the steady-state CACR of a running system; a scratch patch invalidates the IC by writing 0xa40ce100 (this value + ICINVA)
+cache_enable_unreferenced = 0x4001f3e0; // type:func region:image // dead twin of boot_cache_enable (CACR 0xa50ce100, ACR0 0x4007e020, rts); zero callers by absolute-byte and pc-relative search. ☠ Do NOT jsr at runtime: DCINVA in 0xa50ce100 discards dirty copyback lines without pushing them
+
+# ---- OS upgrade / flash ----
+os_upgrade_stage = 0x4007f748; // type:func region:image // ELUP card-upgrade stage/verify: open(name,"r"), size -> os_upgrade_file_len, 512B header via bounce os_upgrade_bounce, cmpl "ELUP" (0x400a966c) at 0x4007f7fe; verify arg!=0 stops after header, arg==0 assembles the whole file at os_upgrade_stage_buf+0x200 in 4KB chunks. ☠ NO upper length cap (only len>15)
+os_upgrade_flash_write = 0x40080074; // type:func region:image // ELUP flash programmer: erases per flash_sector_table via flash_sector_erase, programs 256B pages via flash_program_256 sourcing os_upgrade_stage_buf+0xc; ends IRQ-masked jsr 0x40010a4c then bras . (reboots, never returns)
+os_upgrade_task = 0x400803ec; // type:func region:image // "OS UPGRADE" task entry (spawned by confirm callback 0x40080434); runs state obj 0x400d0b4e whose table 0x400d0a98 dispatches os_upgrade_flash_write
+os_upgrade_stage_buf = 0x46949e80; // type:data region:sdram // ELUP staging: 0x200 header + assembled OS image, in SDRAM BSS; flash writer reads from +0xc. Real 1.40C image ends 0x469bc9dc, flash-capacity bound 0x46b45e8c — never reaches 0x48000000 for any flashable image
+os_upgrade_file_len = 0x460f7804; // type:data region:sdram // upgrade file byte length, set by os_upgrade_stage and the ELFU handler; flash writers derive page counts from it
+os_upgrade_bounce = 0x4f4ede10; // type:data region:sdram // ELUP sector bounce buffer (512B header, 4KB chunk reads) in the streaming region above the scratch top
+factory_os_handler = 0x40080160; // type:func region:image // ELFU path: opens "/octatrack_factory_os.bin" (0x400b7664), 8MB cap at 0x40080206, magic "ELFU" (0x400a9654), stages at factory_os_stage_buf in 64KB chunks via bounce 0x4f4eee10
+factory_os_flash_write = 0x4007fb84; // type:func region:image // ELFU flash programmer (cap 0x1fc000): erase/program from factory_os_stage_buf+0xc, then compares/programs the 2MB memory-mapped flash window at 0x200000 (cap 0x600000 at 0x4007fd14)
+factory_os_stage_buf = 0x46147b20; // type:data region:sdram // ELFU staging in SDRAM BSS, 8MB cap -> max end 0x46947b20
+flash_sector_erase = 0x40020628; // type:func region:image // flash sector erase, arg = sector offset from flash_sector_table
+flash_program_256 = 0x400206f4; // type:func region:image // flash 256-byte page program, args (src RAM addr, flash offset)
+
+# ---- AED destructive-op write path ----
+aed_op_menu_handler_tbl = 0x400ceff8; // type:data size:0x58 region:image // 22 EDIT-menu op handler fn ptrs, parallel to aed_op_string_tbl; NORMALIZE=0x40074f7c REVERSE=0x40075170 DELETE=0x40076004 CROP=0x40076194; both bases loaded by the menu builder at 0x40075da6/0x40075dac
+aed_op_string_tbl = 0x400cf050; // type:data size:0x58 region:image // 22 op string ptrs (SELECT ALL first, CHANGE VIEW last), order = aed_op_menu_handler_tbl
+aed_op_queue = 0x460d17ce; // type:data region:sdram // the AED op-message queue object (kernel queue at 0x460d17ae +0x20); menu handlers k_queue_post op msgs (byte+0 op id, +2 slot, +10/+14 sel start/end, +30 completion cb) into it
+aed_op_task_loop = 0x4008484e; // type:code region:image // AED worker task recv loop: k_queue_recv(aed_op_queue), op byte <45, jmp via aed_op_jump_tbl; op 24 NORMALIZE -> aed_normalize_worker, op 25 REVERSE -> aed_reverse_worker
+aed_op_jump_tbl = 0x40084870; // type:data size:0x5a region:image // 45 word offsets (pc-relative from this base) for the AED op dispatch at 0x4008486c
+aed_normalize_worker = 0x40095774; // type:func region:image // NORMALIZE(slot,start,end): peak pass then gain pass writes ONLY through flex_pcm_read pointers (jsr 0x4009499c) + 8-byte staging 0x46c2d980; allocates nothing — cannot reach 0x48000000+
+aed_reverse_worker = 0x40095268; // type:func region:image // REVERSE(slot,start,end): in-place swap via fetch 0x400951ac / store 0x40095200, both resolve through flex_pcm_read; allocates nothing — cannot reach 0x48000000+
+pcm_store16 = 0x400980c0; // type:func region:image // pack staging longs -> 16-bit PCM at arg0 (all writes via a1); the AED store fn for 16-bit slots
+pcm_store24 = 0x40097d1c; // type:func region:image // pack staging longs -> 24-bit PCM at arg0; the AED store fn for 24-bit slots
+pcm_load16 = 0x400982e4; // type:func region:image // unpack 16-bit PCM at arg1 -> staging longs at arg0; AED load fn
+pcm_load24 = 0x4009825c; // type:func region:image // unpack 24-bit PCM at arg1 -> staging longs at arg0; AED load fn

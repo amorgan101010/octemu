@@ -1,0 +1,152 @@
+# ☠ Waits are in GUEST time (wait_guest_ms), not wall time. The emulator does
+# not hold realtime on a busy host — measured at load average 121, 52 s of
+# wall-clock waits gave the guest 5.0 s of audio and every gesture landed in
+# an Octatrack that had barely booted.
+{"wait_text":"PTCH","timeout_ms":180000}
+{"wait_guest_ms":6000}
+{"press":"FUNC"}
+{"wait_guest_ms":800}
+{"tap":"FX1","until":"FX1 5ETUP","verify_ms":20000,"timeout_ms":150000}
+{"wait_guest_ms":600}
+{"release":"FUNC"}
+{"wait_guest_ms":2000}
+# 20 UP taps walk the chooser to the top of the list, where NONE is: a fresh
+# project publishes FX1 = FLTR (id 4) and FX2 = DELAY (id 8) on every track, so
+# the selection has to be moved. These are the only gestures here with no screen
+# gate — build-fixture.sh reads published_fx_ids (0x80000ec4) off the finished
+# fixture instead, so a lost or extra tap fails the build.
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":1500}
+{"tap":"YES"}
+{"wait_guest_ms":3000}
+{"mark":"fx1-none"}
+{"dump":1}
+{"press":"FUNC"}
+{"wait_guest_ms":800}
+{"tap":"FX2","until":"FX2 5ETUP","verify_ms":20000,"timeout_ms":150000}
+{"wait_guest_ms":600}
+{"release":"FUNC"}
+{"wait_guest_ms":2000}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":600}
+{"tap":"UP"}
+{"wait_guest_ms":1500}
+{"tap":"YES"}
+{"wait_guest_ms":3000}
+{"mark":"fx2-none"}
+{"dump":1}
+{"press":"FUNC"}
+{"wait_guest_ms":800}
+{"tap":"SRC","until":"5RC 5ETUP","verify_ms":20000,"timeout_ms":150000}
+{"wait_guest_ms":600}
+{"release":"FUNC"}
+{"wait_guest_ms":2000}
+{"tap":"RIGHT"}
+{"wait_guest_ms":2000}
+{"tap":"RIGHT","until":"L0AD FILE T0 5TATIC 1","verify_ms":20000,"timeout_ms":150000}
+{"wait_guest_ms":2500}
+{"tap":"YES","until_gone":"L0AD FILE T0 5TATIC 1","verify_ms":10000,"timeout_ms":180000}
+{"wait_guest_ms":4000}
+{"tap":"NO","until_gone":"5RC 5ETUP","verify_ms":10000,"timeout_ms":120000}
+{"wait_guest_ms":5000}
+{"mark":"assigned"}
+{"dump":1}
+{"tap":"REC"}
+{"wait_guest_ms":3000}
+{"tap":"TRIG1"}
+{"wait_guest_ms":3000}
+{"wait_lamp":0,"lit":1,"timeout_ms":20000}
+{"mark":"trig-placed"}
+{"tap":"REC"}
+{"wait_guest_ms":4000}
+{"tap":"PROJ","until":"REL0AD","verify_ms":15000,"timeout_ms":120000}
+{"wait_guest_ms":3000}
+{"tap":"RIGHT"}
+{"wait_guest_ms":3000}
+{"tap":"DOWN"}
+{"wait_guest_ms":3000}
+{"tap":"YES","until":"C0NTINUE?","verify_ms":20000,"timeout_ms":150000}
+{"wait_guest_ms":2500}
+{"tap":"YES","until_gone":"C0NTINUE?","verify_ms":20000,"timeout_ms":300000}
+{"wait_guest_ms":10000}
+{"mark":"saved"}
+{"dump":1}
+{"tap":"PROJ"}
+{"wait_guest_ms":6000}
+{"mark":"done"}
+{"dump":1}
+{"wait_guest_ms":5000}

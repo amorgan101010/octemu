@@ -1,0 +1,7 @@
+# Boot the fixture's project and just HOLD, so a probe can attach over gdb and
+# read guest memory (sample slot tables, buffers, etc.). No trigs, no UI.
+{"wait_text":"PTCH","timeout_ms":600000}
+{"wait_guest_ms":8000}
+{"mark":"ready"}
+{"wait_guest_ms":600000}
+{"mark":"holdend"}
