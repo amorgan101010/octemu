@@ -91,9 +91,8 @@ def config_descriptor(hs):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--in", dest="inp",
-                    default=os.path.join(ROOT, "out/receive-amp.bin"))
-    ap.add_argument("--out", default=os.path.join(ROOT, "out/usb-midi.bin"))
+    ap.add_argument("--in", dest="inp", required=True)
+    ap.add_argument("--out", required=True)
     a = ap.parse_args()
     img = bytearray(open(a.inp, "rb").read())
 

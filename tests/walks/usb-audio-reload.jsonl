@@ -1,0 +1,40 @@
+# USB-audio durability under a project reload. The payload survives a power-on
+# boot trivially; what has never been tested is flex_heap_init, which a PROJECT
+# RELOAD runs (re/coldfire.syms: callers 0x4001fbb4 + five project-menu sites)
+# and which memsets the whole sample heap 0x40a955e0..0x46025de0 and re-seeds
+# the free-page stack. A heap-allocated payload is erased by it; a payload at a
+# fixed base outside the heap should not be.
+#
+# ☠ The assertion is AUDIBLE, not structural: fire TRIG9 before and after the
+# reload and require the stream to carry audio BOTH times. A payload that
+# survives as bytes but whose hooks no longer run would pass any check that
+# only looked at memory.
+{"wait_text":"PTCH","timeout_ms":600000}
+{"wait_guest_ms":8000}
+{"mark":"ready"}
+{"wait_guest_ms":8000}
+{"mark":"before"}
+{"tap":"TRIG9"}
+{"wait_guest_ms":6000}
+{"tap":"TRIG9"}
+{"wait_guest_ms":6000}
+{"mark":"preloaded"}
+{"tap":"PROJ","until":"REL0AD","verify_ms":15000,"timeout_ms":120000}
+{"wait_guest_ms":3000}
+{"tap":"RIGHT"}
+{"wait_guest_ms":2000}
+{"tap":"DOWN"}
+{"wait_guest_ms":2000}
+{"tap":"YES","until":"C0NTINUE","verify_ms":20000,"timeout_ms":150000}
+{"wait_guest_ms":2500}
+{"tap":"YES","until_gone":"C0NTINUE","verify_ms":20000,"timeout_ms":300000}
+{"wait_guest_ms":25000}
+{"mark":"reloaded"}
+{"wait_guest_ms":8000}
+{"mark":"after"}
+{"tap":"TRIG9"}
+{"wait_guest_ms":6000}
+{"tap":"TRIG9"}
+{"wait_guest_ms":6000}
+{"mark":"survived"}
+{"wait_guest_ms":30000}

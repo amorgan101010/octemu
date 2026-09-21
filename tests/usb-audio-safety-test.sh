@@ -4,27 +4,32 @@
 #
 # The ONLY recovery this feature is allowed to need is "delete /USBAUDIO.BIN
 # from the CF card". That makes the card file's integrity a SAFETY property,
-# not a convenience: any card the Octatrack cannot use in full must leave it
+# not a convenience: any card the machine cannot use in full must leave it
 # running as the stock usb-midi composite, booting normally.
 #
 # Four cards, each booted in --hw-faithful mode (poisoned scratch, host-driven
-# frame signal — see src/board/ot-board.c):
+# frame signal — see qemu/ot-board.c):
 #
 #   absent     no /USBAUDIO.BIN at all          -> stock composite, boots
 #   truncated  the blob cut short               -> stock composite, boots
 #   corrupt    one byte flipped mid-blob        -> stock composite, boots
 #   good       the real blob                    -> UAC1 composite, boots
 #
+# ☠ "UAC1 composite" is 5 interfaces since the descriptors were split into two
+# audio functions (AudioControl+MIDIStreaming, AudioControl+AudioStreaming) —
+# macOS rejects a single AudioControl that collects both, with
+# AUAErrorCode.noAudioFunctions.
+#
 # "stock composite" is asserted structurally: 3 interfaces and NO isochronous
-# endpoint. "UAC1 composite" is 4 interfaces WITH the iso EP. An Octatrack
-# that fails to reach PTCH fails the gate outright — that is the exception screen.
+# endpoint. "UAC1 composite" is 4 interfaces WITH the iso EP. A machine that
+# fails to reach PTCH fails the gate outright — that is the exception screen.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-IMG=out/usb-audio.bin
-PAY=out/usb-audio-payload.bin
+IMG=${IMG:-$(ls -t out/OCTATRACK_OS*_usb-audio_*.os 2>/dev/null | head -1)}
+[ -n "$IMG" ] || { echo "no usb-audio image — run: make fw-usb-audio" >&2; exit 1; }
+PAY=out/USBAUDIO.BIN
 OUT=out/usb-audio-safety
-[ -f "$IMG" ] || { echo "build $IMG first (make out/usb-audio.bin)"; exit 1; }
 [ -f "$PAY" ] || { echo "missing $PAY"; exit 1; }
 
 rm -rf "$OUT"; mkdir -p "$OUT"
@@ -72,7 +77,7 @@ run_case() {
         sleep 2
     done
     if ! grep -q '\[mark\].*ready' "$dir/walk.log"; then
-        echo "  $name: FAIL — the Octatrack never reached the UI (this is the exception screen)"
+        echo "  $name: FAIL — machine never reached the UI (this is the exception screen)"
         stop_emu $emu "$dir"; fail=1; return
     fi
     timeout 60 python3 tests/usb-host.py "$sock" enum > "$dir/enum.log" 2>&1
@@ -92,7 +97,7 @@ echo "USB-audio recovery gate (--hw-faithful):"
 run_case absent    none                 3 0
 run_case truncated "$OUT/truncated.bin" 3 0
 run_case corrupt   "$OUT/corrupt.bin"   3 0
-run_case good      "$PAY"               4 1
+run_case good      "$PAY"               5 1
 
 if [ $fail -eq 0 ]; then
     echo "ALL USB-AUDIO SAFETY GATES PASSED"

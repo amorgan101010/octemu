@@ -8,21 +8,21 @@
 # SCENARIO is passed through to usb-host.py (audio-validate / audio-alt /
 # audio-cadence [N] / audio-stream OUT [N]). Exits with the scenario's code.
 # The card fixture (out/usb-audio-card, carrying /USBAUDIO.BIN) is staged on
-# demand. A TRIG9-style walk can be supplied via WALK=tests/walks/usb-audio-trig.jsonl.
+# demand. A TRIG9-style walk can be supplied via WALK=tests/walks/foo.jsonl.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 SCEN=${1:?usage: usb-audio-test.sh SCENARIO [ARGS...]}
 shift || true
-IMG=out/usb-audio.bin
+IMG=${IMG:-$(ls -t out/OCTATRACK_OS*_usb-audio_*.os 2>/dev/null | head -1)}
+[ -n "$IMG" ] || { echo "no usb-audio image — run: make fw-usb-audio" >&2; exit 1; }
 CARD=out/usb-audio-card
 WALK=${WALK:-tests/walks/boot-hold.jsonl}
-[ -f "$IMG" ] || { echo "build $IMG first (make out/usb-audio.bin)"; exit 1; }
-# Restage whenever the payload is newer than the card. The trampoline's
+# ☠ Restage whenever the payload is newer than the card. The trampoline's
 # checksum gate REJECTS a card whose blob does not match this image (by
-# design), so a stale fixture silently degrades the Octatrack to the stock
+# design), so a stale fixture silently degrades the machine to the stock
 # usb-midi composite and every audio assertion fails for the wrong reason.
-if [ ! -f "$CARD/card.img" ] || [ out/usb-audio-payload.bin -nt "$CARD/card.img" ]; then
+if [ ! -f "$CARD/card.img" ] || [ out/USBAUDIO.BIN -nt "$CARD/card.img" ]; then
     tests/usb-audio-card.sh "$CARD" >/dev/null
 fi
 

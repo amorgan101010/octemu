@@ -12,7 +12,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-IMG=out/usb-midi.bin
+IMG=${IMG:-$(ls -t out/OCTATRACK_OS*_usb-midi_*.os 2>/dev/null | head -1)}
+[ -n "$IMG" ] || { echo "no usb-midi image — run: make fw-usb-midi" >&2; exit 1; }
 SYM=out/usb-midi.sym
 [ -f "$IMG" ] && [ -f "$SYM" ] || { echo "build $IMG first"; exit 1; }
 DROPS=$(sed -n 's/^usbmidi_tx_drops=//p' "$SYM")

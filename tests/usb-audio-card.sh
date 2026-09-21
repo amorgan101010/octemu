@@ -6,14 +6,14 @@
 # blob as /USBAUDIO.BIN at the card root, where custom/coldfire/usb-audio-tramp.s reads it.
 # scripts/card.py writes into the image with mtools — no mount, no root.
 #
-#   tests/usb-audio-card.sh DST [PAYLOAD]   (default payload: out/usb-audio-payload.bin)
+#   tests/usb-audio-card.sh DST [PAYLOAD]   (default payload: out/USBAUDIO.BIN)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 DST=${1:?usage: usb-audio-card.sh DST [PAYLOAD]}
-PAYLOAD=${2:-out/usb-audio-payload.bin}
+PAYLOAD=${2:-out/USBAUDIO.BIN}
 SRC=out/fx2
-[ -f "$PAYLOAD" ] || { echo "missing $PAYLOAD (make out/usb-audio.bin)"; exit 1; }
+[ -f "$PAYLOAD" ] || { echo "missing $PAYLOAD (make fw-usb-audio)"; exit 1; }
 [ -f "$SRC/card.img" ] || { echo "missing $SRC/card.img"; exit 1; }
 
 mkdir -p "$DST"

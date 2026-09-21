@@ -14,8 +14,8 @@ not identical ones, and this no longer asserts a sample-exact match.
 WHAT IS ASSERTED, and why each one can fail:
 
   1. the capture carries real audio (not silence, which would pass anything);
-  2. its dominant frequency is the fixture's tone, so it is the OCTATRACK's
-     own audio and not noise;
+  2. its dominant frequency is the fixture's tone, so it is THIS machine's
+     audio and not noise;
   3. it is CONTINUOUS through the sustained part of the burst — no dropped or
      duplicated run of frames. A gap in a sine shows up as a sample-to-sample
      jump far larger than the waveform's own maximum slope, which is what the
@@ -126,7 +126,7 @@ def main():
         print("  FAIL: capture is effectively silent")
         ok = False
 
-    # 2. it is the Octatrack's tone
+    # 2. it is this machine's tone
     f = dom_freq(iso)
     if abs(f - tone) > tone * 0.05:
         print(f"  FAIL: dominant frequency {f:.1f} Hz, expected {tone:.0f} Hz")

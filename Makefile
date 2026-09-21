@@ -6,6 +6,37 @@ UNAME := $(shell uname)
 IMG  := out/os/main.bin
 QEMU := vendor/qemu/build/qemu-system-m68k
 DSP  := vendor/dsp56300
+
+# ☠ Defined at the top: make expands a rule's target AND prerequisite names
+# when it parses the rule, so anything naming a file built from these must
+# see them first. Defined lower down, every such name came out empty.
+OS_VER  ?= 1.40C
+# ☠ A sha in the filename must mean the image IS that commit. With anything
+# uncommitted it would be a lie, so a dirty tree builds as SNAPSHOT instead.
+BUILD   ?= $(shell git diff --quiet HEAD 2>/dev/null && \
+                   git rev-parse --short=6 HEAD 2>/dev/null || echo SNAPSHOT)
+VERSION ?= OEMU-$(BUILD)
+STOCKSYX = downloads/extracted/OCTATRACK_OS$(OS_VER).syx
+STOCKBIN = downloads/extracted/OCTATRACK_OS$(OS_VER).bin
+EFT      = vendor/elektron-firmware-tool/elektron-firmware-tool
+
+# ------------------------------------------------------------ custom images --
+# Each one patches YOUR out/os/main.bin, adding a machine or a feature the stock
+# OS does not have (README.md says what each one is). They assemble the ColdFire
+# sources in custom/coldfire/, so they need the m68k cross-assembler.
+ASM_PREFLIGHT = @command -v m68k-elf-as >/dev/null || \
+    { echo "m68k-elf-as not found — brew install m68k-elf-binutils m68k-elf-gcc" >&2; exit 1; }
+
+# Each firmware is emitted under ONE basename in three forms, differing only by
+# suffix: .os is the raw patched MAIN OS section (what ./octemu --os takes and
+# what the next patch in the chain builds on), .bin is the ELUP container for
+# the CF-card upgrade path, .syx is the same container for MIDI DIN. Elektron's
+# own OCTATRACK_OS<ver>.bin is a container too, so only the container may carry
+# that name; the raw section gets .os so the format is never in doubt.
+OSNAME   = out/OCTATRACK_OS$(OS_VER)_$(1)_$(BUILD)
+RECEIVE  = $(call OSNAME,receive)
+USBMIDI  = $(call OSNAME,usb-midi)
+USBAUDIO = $(call OSNAME,usb-audio)
 DSPA := $(DSP)/build/source/dsp56kEmu/libdsp56kEmu.a \
         $(DSP)/build/source/dsp56kBase/libdsp56kBase.a \
         $(DSP)/build/source/asmjit/libasmjit.a
@@ -39,7 +70,7 @@ all: octdsp octemu panel card
         test-emu-usb-audio-enum test-emu-usb-audio-alt \
         test-emu-usb-audio-cadence test-emu-usb-audio-stream \
         test-emu-usb-audio-safety \
-        fw-all fw-receive fw-receive-amp fw-usb-midi fw-usb-audio image clean
+        fw-all fw-receive fw-usb-midi fw-usb-audio clean
 
 # ---------------------------------------------------------------- preflight --
 # scripts/doctor.sh reads the Brewfile, so the dependency list lives in exactly
@@ -141,13 +172,13 @@ demo-gif: octemu $(QEMU) $(IMG) out/panel/panel.bin \
 # image, because without the stock DSP amp envelope a RECEIVE track passes
 # audio forever and the trigs this walk places would shape nothing. Needs the
 # m68k cross-assembler.
-receive-gif: octemu $(QEMU) out/receive-amp.bin out/panel/panel.bin \
+receive-gif: octemu $(QEMU) $(RECEIVE).os out/panel/panel.bin \
              out/fx/card.img tests/walks/receive.jsonl
 	@echo "== assets/receive.gif: the RECEIVE walk, about 2 min =="
 	@rm -rf out/receive && mkdir -p out/receive
 	@cp out/fx/card.img out/fx/nvram.bin out/receive/
 	./octemu --cf-card out/receive/card.img --nvram out/receive/nvram.bin \
-	    --os out/receive-amp.bin --script tests/walks/receive.jsonl \
+	    --os $(RECEIVE).os --script tests/walks/receive.jsonl \
 	    --recording assets/receive.gif --timeout 900
 
 # -------------------------------------------------------------------- tests --
@@ -205,40 +236,40 @@ test-emu-usb: octemu $(QEMU) $(IMG) out/fx2/card.img
 
 # The USB-MIDI end-to-end demo on the patched image: OT->host clock/transport
 # out EP2 IN, and host->OT a USB note-on firing track 1's sample out of MAIN.
-test-emu-usb-midi: octemu $(QEMU) out/usb-midi.bin out/fx2/card.img
+test-emu-usb-midi: octemu $(QEMU) $(USBMIDI).os out/fx2/card.img
 	tests/usb-midi-demo.sh
 
 # USB-MIDI RX message-type conformance: every MIDI message class sent in on
 # EP2 OUT must decode to the right byte count in the DIN FIFO, at BOTH
 # full and high speed.
-test-emu-usb-midi-conform: octemu $(QEMU) out/usb-midi.bin out/fx2/card.img
+test-emu-usb-midi-conform: octemu $(QEMU) $(USBMIDI).os out/fx2/card.img
 	tests/usb-midi-conform.sh
 
 # USB-MIDI descriptor + enumeration conformance: independent structural
 # validation of the composite config against USB-MIDI 1.0, plus the standard
 # requests a host issues incl CLEAR_FEATURE(halt) on EP2.
-test-emu-usb-midi-enum: octemu $(QEMU) out/usb-midi.bin out/fx2/card.img
+test-emu-usb-midi-enum: octemu $(QEMU) $(USBMIDI).os out/fx2/card.img
 	tests/usb-midi-enum.sh
 
 # USB-MIDI TX loss-free gate: sustained clock/transport out EP2 IN with the drop
 # counter at zero under continuous drain, and overflow COUNTED (not silent)
 # under deliberate starvation.
-test-emu-usb-midi-stress: octemu $(QEMU) out/usb-midi.bin out/fx2/card.img
+test-emu-usb-midi-stress: octemu $(QEMU) $(USBMIDI).os out/fx2/card.img
 	tests/usb-midi-stress.sh
 
 # USB-MIDI composite coexistence: MSC (EP1) and MIDI (EP2) interleaved stay
 # correct with zero MIDI drops, and MIDI keeps flowing across a DISK MODE
 # enter/exit cycle.
-test-emu-usb-midi-coexist: octemu $(QEMU) out/usb-midi.bin out/fx2/card.img
+test-emu-usb-midi-coexist: octemu $(QEMU) $(USBMIDI).os out/fx2/card.img
 	tests/usb-midi-coexist.sh
 
 # Image safety: nothing else writes the patch's free-zone code region.
-test-emu-usb-midi-imgcheck: octemu $(QEMU) out/usb-midi.bin out/fx2/card.img
+test-emu-usb-midi-imgcheck: octemu $(QEMU) $(USBMIDI).os out/fx2/card.img
 	tests/usb-midi-imgcheck.sh
 
 # The whole USB-MIDI regression suite, in one target. Sequential on purpose: each sub-gate boots its own emulator on its own gdb port, and
 # running them back-to-back (not overlapping) avoids port/socket contention.
-test-usb-midi: octemu $(QEMU) out/usb-midi.bin out/fx2/card.img
+test-usb-midi: octemu $(QEMU) $(USBMIDI).os out/fx2/card.img
 	tests/usb-bench-test.sh msc
 	tests/usb-midi-demo.sh
 	tests/usb-midi-conform.sh
@@ -250,16 +281,16 @@ test-usb-midi: octemu $(QEMU) out/usb-midi.bin out/fx2/card.img
 
 # P1 — enumerate as a 4-interface UAC1 composite with the AudioStreaming
 # interface + iso IN endpoint, MSC + MIDI descriptors still intact.
-test-emu-usb-audio-enum: octemu $(QEMU) out/usb-audio.bin out/fx2/card.img
+test-emu-usb-audio-enum: octemu $(QEMU) $(USBAUDIO).os out/fx2/card.img
 	tests/usb-audio-test.sh audio-validate
 
 # P2 — SET_INTERFACE(3, alt 1) brings the EP3 iso stream up (a packet flows),
 # alt 0 tears it down (the endpoint goes idle).
-test-emu-usb-audio-alt: octemu $(QEMU) out/usb-audio.bin out/fx2/card.img
+test-emu-usb-audio-alt: octemu $(QEMU) $(USBAUDIO).os out/fx2/card.img
 	tests/usb-audio-test.sh audio-alt
 
 # P3 — the 44.1 kHz iso cadence: every packet 176/180 B, 441 frames per 10.
-test-emu-usb-audio-cadence: octemu $(QEMU) out/usb-audio.bin out/fx2/card.img
+test-emu-usb-audio-cadence: octemu $(QEMU) $(USBAUDIO).os out/fx2/card.img
 	tests/usb-audio-test.sh audio-cadence 200
 
 # P4 — the stream is real, continuous, guest-produced audio over a TRIG9 burst:
@@ -267,7 +298,7 @@ test-emu-usb-audio-cadence: octemu $(QEMU) out/usb-audio.bin out/fx2/card.img
 # recording. It is the summed post-FX pre-fader track bus, not MAIN, so it is a
 # related signal rather than an identical one — tests/usb-audio-verify.py says
 # exactly what it asserts and why each assertion can fail.
-test-emu-usb-audio-stream: octemu $(QEMU) out/usb-audio.bin out/fx2/card.img
+test-emu-usb-audio-stream: octemu $(QEMU) $(USBAUDIO).os out/fx2/card.img
 	tests/usb-audio-stream-test.sh
 
 # P5 — the RECOVERY gate, and the one that governs whether this may be
@@ -275,16 +306,20 @@ test-emu-usb-audio-stream: octemu $(QEMU) out/usb-audio.bin out/fx2/card.img
 # this feature is allowed to need, so a card the Octatrack cannot use in full
 # (absent, truncated, corrupt) must leave it booting as the stock usb-midi
 # composite. Runs --hw-faithful, like every USB-audio gate.
-test-emu-usb-audio-safety: octemu $(QEMU) out/usb-audio.bin out/fx2/card.img
+test-emu-usb-audio-safety: octemu $(QEMU) $(USBAUDIO).os out/fx2/card.img
 	tests/usb-audio-safety-test.sh
 
 # The whole USB-audio regression suite. Sequential, like test-usb-midi.
-test-usb-audio: octemu $(QEMU) out/usb-audio.bin out/fx2/card.img
+test-usb-audio: octemu $(QEMU) $(USBAUDIO).os out/fx2/card.img
+	@python3 tests/lint-gates.py
 	tests/usb-audio-safety-test.sh
+	tests/usb-audio-qh-test.sh
 	tests/usb-audio-test.sh audio-validate
 	tests/usb-audio-test.sh audio-alt
 	tests/usb-audio-test.sh audio-cadence 200
 	tests/usb-audio-stream-test.sh
+	tests/usb-audio-durability-test.sh
+	tests/usb-audio-guard-test.sh
 	@echo "ALL USB-AUDIO GATES PASSED"
 
 # `make test` is the fast, deterministic set — about 25 seconds, and a clean
@@ -300,91 +335,67 @@ test: test-dsp test-dsp-metro test-emac test-emu
 test-audio: test-emu-audio
 	@echo "PASSED: the audio walk — ☠ re-run at least 3x before believing a result."
 
-# ------------------------------------------------------------ custom images --
-# Each one patches YOUR out/os/main.bin, adding a machine or a feature the stock
-# OS does not have (README.md says what each one is). They assemble the ColdFire
-# sources in custom/coldfire/, so they need the m68k cross-assembler.
-ASM_PREFLIGHT = @command -v m68k-elf-as >/dev/null || \
-    { echo "m68k-elf-as not found — brew install m68k-elf-binutils m68k-elf-gcc" >&2; exit 1; }
 
-fw-all: fw-receive fw-receive-amp fw-usb-midi fw-usb-audio
-	@echo "ok: out/receive.bin out/receive-amp.bin out/usb-midi.bin out/usb-audio.bin"
+# Pack $(1).os into the two things a real unit will take.
+define pack
+	@test -f $(STOCKSYX) || { echo "missing $(STOCKSYX) — run 'make os'"; exit 1; }
+	@test -f $(STOCKBIN) || { echo "missing $(STOCKBIN) — run 'make os'"; exit 1; }
+	@test -x $(EFT) || { echo "missing $(EFT) — run 'make setup'"; exit 1; }
+	python3 custom/make-bin.py --verify $(STOCKBIN)
+	$(EFT) -i $(STOCKSYX) -c 3 $(1).os -V $(VERSION) \
+	    --emit-container out/elek_$(BUILD).bin -o $(1).syx
+	python3 custom/make-bin.py out/elek_$(BUILD).bin -o $(1).bin
+	@echo
+	@echo "  raw OS:     $(1).os   (./octemu --os)"
+	@echo "  card image: $(1).bin  (CF root, PROJECT -> OS UPGRADE)"
+	@echo "  MIDI image: $(1).syx"
+	@echo "  ☠ Back up the card first. Copy the .bin to the card ROOT, eject the"
+	@echo "     card properly, then PROJECT -> OS UPGRADE. An unejected write can"
+	@echo "     leave a truncated file. The .syx is the MIDI DIN recovery path."
+endef
 
-fw-receive:     out/receive.bin
-fw-receive-amp: out/receive-amp.bin
-fw-usb-midi:    out/usb-midi.bin
-fw-usb-audio:   out/usb-audio.bin
+fw-all: fw-receive fw-usb-midi fw-usb-audio
 
-out/receive.bin: custom/receive.py custom/coldfire/receive.s $(IMG)
+fw-receive:   $(RECEIVE).os  ; $(call pack,$(RECEIVE))
+fw-usb-midi:  $(USBMIDI).os  ; $(call pack,$(USBMIDI))
+fw-usb-audio: $(USBAUDIO).os ; $(call pack,$(USBAUDIO))
+
+$(RECEIVE).os: custom/receive.py custom/coldfire/receive.s \
+               custom/coldfire/receive-amp.s $(IMG)
 	$(ASM_PREFLIGHT)
-	python3 custom/receive.py
+	python3 custom/receive.py --out $@
 
-# RECEIVE with a WORKING AMP page: the stock DSP amp envelope driven by
-# custom/coldfire/receive-amp.s (silent at rest, sequencer trigs open it,
-# ATK/HOLD/REL/VOL shape it, HOLD/REL INF defaults = NEIGHBOR's one-trig drone).
-out/receive-amp.bin: custom/receive.py custom/coldfire/receive.s \
-                     custom/coldfire/receive-amp.s $(IMG)
-	$(ASM_PREFLIGHT)
-	python3 custom/receive.py --amp --out out/receive-amp.bin
-
-# The USB-MIDI image: the receive-amp build with the dormant USB-MIDI half
+# The USB-MIDI image: the RECEIVE build with the dormant USB-MIDI half
 # resurrected — one image carries RECEIVE+AMP and USB-MIDI both.
-out/usb-midi.bin: custom/usb-midi.py custom/coldfire/usb-midi.s out/receive-amp.bin
+$(USBMIDI).os: custom/usb-midi.py custom/coldfire/usb-midi.s $(RECEIVE).os
 	$(ASM_PREFLIGHT)
-	python3 custom/usb-midi.py
+	python3 custom/usb-midi.py --in $(RECEIVE).os --out $@
 
 # The USB-audio image: the usb-midi build with a UAC1 AudioStreaming interface
 # + iso IN endpoint added. The payload rides the CF card as /USBAUDIO.BIN and is
 # copied into SDRAM scratch at runtime, so ONE image carries RECEIVE+AMP,
 # USB-MIDI, and USB-audio.
-out/usb-audio.bin: custom/usb-audio.py custom/coldfire/usb-audio.s \
-                   custom/coldfire/usb-audio-tramp.s out/usb-midi.bin
+$(USBAUDIO).os: custom/usb-audio.py custom/coldfire/usb-audio.s \
+                custom/coldfire/usb-audio-tramp.s \
+                custom/coldfire/usb-audio-alloc.s \
+                custom/coldfire/usb-audio-report.s \
+                custom/coldfire/usb-audio-guard.s $(USBMIDI).os
 	$(ASM_PREFLIGHT)
-	python3 custom/usb-audio.py
+	python3 custom/usb-audio.py --in $(USBMIDI).os --out $@
 
 # ------------------------------------------------------------------ hardware --
-# Repack a patched MAIN OS section into the two things a real unit will take: a
-# .syx for the MIDI DIN upgrade path and an ELUP .bin for the CF-card path.
-#
-#   make image                       receive, stamped with the git SHA
-#   make image FIRMWARE=usb-midi     any out/<FIRMWARE>.bin from the fw-* targets
-#   make image BUILD=042             stamp something else (<= 6 chars)
-#
-# FIRMWARE is the basename of the image to pack: receive, receive-amp, usb-midi,
-# usb-audio. BUILD defaults to the git short SHA, so the version the unit
-# displays maps back to a commit without anyone having to remember to bump a
-# number.
+# The fw-* targets above emit all three forms under one basename. BUILD is the
+# git short SHA, so a filename maps back to a commit — or SNAPSHOT when the
+# tree is dirty, since a SHA would then be a lie. Override it with
+# `make fw-usb-audio BUILD=042` to stamp something else (<= 6 chars).
 #
 # ☠ The emulator cannot tell you an image is safe to flash: it models neither
 # the flash writer nor the bootloader's container check. What IS checked here:
 # custom/make-bin.py --verify regenerates Elektron's own OCTATRACK_OS1.40C.bin
 # byte for byte from that file's own container, so the ELUP encoder is right.
-# Read the flashing section of README.md before writing either to hardware —
-# nothing built here has ever been flashed.
-OS_VER  ?= 1.40C
-FIRMWARE ?= receive
-BUILD   ?= $(shell git rev-parse --short=6 HEAD 2>/dev/null || echo 000001)
-VERSION ?= OEMU$(BUILD)
-STOCKSYX = downloads/extracted/OCTATRACK_OS$(OS_VER).syx
-STOCKBIN = downloads/extracted/OCTATRACK_OS$(OS_VER).bin
-EFT      = vendor/elektron-firmware-tool/elektron-firmware-tool
-
-image: out/$(FIRMWARE).bin
-	@test -f out/$(FIRMWARE).bin || { echo "no out/$(FIRMWARE).bin — try 'make fw-$(FIRMWARE)'"; exit 1; }
-	@test -f $(STOCKSYX) || { echo "missing $(STOCKSYX) — run 'make os'"; exit 1; }
-	@test -f $(STOCKBIN) || { echo "missing $(STOCKBIN) — run 'make os'"; exit 1; }
-	@test -x $(EFT) || { echo "missing $(EFT) — run 'make setup'"; exit 1; }
-	python3 custom/make-bin.py --verify $(STOCKBIN)
-	$(EFT) -i $(STOCKSYX) -c 3 out/$(FIRMWARE).bin -V $(VERSION) \
-	    --emit-container out/elek_$(BUILD).bin \
-	    -o out/OCTATRACK_OS$(OS_VER)_$(VERSION).syx
-	python3 custom/make-bin.py out/elek_$(BUILD).bin \
-	    -o out/OCTATRACK_$(VERSION).bin
-	@$(EFT) -i out/OCTATRACK_OS$(OS_VER)_$(VERSION).syx | tail -6
-	@echo
-	@echo "  card image: out/OCTATRACK_$(VERSION).bin   (CF root, PROJECT -> OS UPGRADE)"
-	@echo "  MIDI image: out/OCTATRACK_OS$(OS_VER)_$(VERSION).syx"
-	@echo "  ☠ Read README.md on flashing first — and know the recovery path."
+# ☠ Flashing is not documented in README.md; the steps this target prints are
+# the only guidance a user gets, so keep them accurate: back up the card, copy
+# to the card ROOT, eject properly, PROJECT -> OS UPGRADE.
 
 clean:
 	rm -f octdsp octemu

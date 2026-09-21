@@ -1,28 +1,27 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
-# usb-audio-stream-test.sh — the P4 gate: the iso stream carries the
-# Octatrack's own audio, continuously.
+# usb-audio-stream-test.sh — the P4 gate: the iso stream equals --recording.
 #
 # Boots the USB-audio image with the TRIG9 walk + --recording + the MAIN audio
 # tap + the packet bench, captures the iso IN stream over EP3 while the walk
-# fires TRIG9, and hands both to tests/usb-audio-verify.py, which asserts the
-# capture is real audio at the fixture's tone, continuous through the burst, and
-# at a level that tracks the recording. ☠ NOT sample-exact against --recording:
-# the stream is the summed post-FX, pre-fader track bus and --recording is MAIN,
-# so they are related signals, not identical ones — see usb-audio-verify.py.
-# A positive control (a spliced-out run of frames must fail) runs every time.
+# fires TRIG9, and proves the decoded capture is a sample-exact substring of
+# the recording (with a built-in 1-LSB positive control).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-IMG=out/usb-audio.bin
+# the firmware images carry a build id in their names, so find them
+OSIMG=${OSIMG:-$(ls -t out/OCTATRACK_OS*_usb-audio_*.os 2>/dev/null | head -1)}
+[ -n "$OSIMG" ] || { echo "no usb-audio image — run: make fw-usb-audio" >&2; exit 1; }
+
+IMG=$OSIMG
 CARD=out/usb-audio-card
 OUT=out/usb-audio-p4
 [ -f "$IMG" ] || { echo "build $IMG first"; exit 1; }
-# Restage whenever the payload is newer than the card. The trampoline's
+# ☠ Restage whenever the payload is newer than the card. The trampoline's
 # checksum gate REJECTS a card whose blob does not match this image (by
-# design), so a stale fixture silently degrades the Octatrack to the stock
+# design), so a stale fixture silently degrades the machine to the stock
 # usb-midi composite and every audio assertion fails for the wrong reason.
-if [ ! -f "$CARD/card.img" ] || [ out/usb-audio-payload.bin -nt "$CARD/card.img" ]; then
+if [ ! -f "$CARD/card.img" ] || [ out/USBAUDIO.BIN -nt "$CARD/card.img" ]; then
     tests/usb-audio-card.sh "$CARD" >/dev/null
 fi
 
@@ -59,9 +58,9 @@ grep -q '\[mark\].*ready' "$LOG" || { echo "no ready"; tail -8 "$LOG"; exit 1; }
 timeout 150 python3 tests/usb-host.py "$SOCK" audio-stream "$OUT/iso.pcm" \
     || { echo "capture failed (no burst caught)"; exit 1; }
 
-# Stop the emulator FIRST so the recording's header is finalized, then compare.
+# Stop the machine FIRST so the recording's header is finalized, then compare.
 # Comparing against a still-open .wav reads a zero-length header, which looks
-# exactly like "the Octatrack recorded nothing".
+# exactly like "the machine recorded nothing".
 stop_emu
 trap - EXIT
 python3 tests/usb-audio-verify.py "$OUT/ref.wav" "$OUT/iso.pcm"

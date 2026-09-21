@@ -13,8 +13,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-IMG=out/usb-midi.bin
-[ -f "$IMG" ] || { echo "build $IMG first (make out/usb-midi.bin)"; exit 1; }
+IMG=${IMG:-$(ls -t out/OCTATRACK_OS*_usb-midi_*.os 2>/dev/null | head -1)}
+[ -n "$IMG" ] || { echo "no usb-midi image — run: make fw-usb-midi" >&2; exit 1; }
 SOCK=$(mktemp -u /tmp/octa-usbenum.XXXXXX)
 LOG=$(mktemp /tmp/octa-usbenum-log.XXXXXX)
 

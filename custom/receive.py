@@ -17,7 +17,7 @@ Handler runs on the ColdFire (m68k-elf-as -mcpu=54454), 240 bytes, in the 240
 freed by absorbing NEIGHBOR's prep. Params: page 1 LV1..LV6 (0..127), page 2
 SRC1..SRC6 (0=OFF, 1..8=that track).
 
-Usage: custom/receive.py [--amp] [--in out/os/main.bin] [--out out/receive.bin]
+Usage: custom/receive.py [--in out/os/main.bin] [--out out/receive.bin]
 """
 import argparse
 import os
@@ -92,15 +92,7 @@ def assemble(src, stem):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--in", dest="inp", default=os.path.join(ROOT, "out/os/main.bin"))
-    ap.add_argument("--out", default=os.path.join(ROOT, "out/receive.bin"))
-    ap.add_argument("--amp", action="store_true",
-                    help="make the AMP page WORK: hook the record builder's "
-                         "id-3 marker block so a RECEIVE voice runs the "
-                         "stock DSP amp envelope — silent at rest, a trig "
-                         "opens it, ATK/HOLD/REL/VOL/BAL/XVOL shape it, and "
-                         "REL=INF after one trig is NEIGHBOR's drone. "
-                         "Installs custom/coldfire/receive-amp.s in the free zone and "
-                         "points prep[3] at its trig recorder.")
+    ap.add_argument("--out", required=True)
     a = ap.parse_args()
     img = bytearray(open(a.inp, "rb").read())
 
@@ -167,7 +159,7 @@ def main():
     # free. NULL leaves the track behaving like NEIGHBOR: armed once, sounding
     # forever, AMP page dead. --amp points it at the trig recorder instead, so a
     # trig opens the stock amp envelope and ATK/HOLD/REL/VOL shape it.
-    if a.amp:
+    if True:   # not optional: a RECEIVE track without it is silent
         amp, syms = assemble(AMP_ASM, "receive-amp")
         if len(amp) > CODE_ROOM:
             sys.exit("receive-amp is %d bytes, code zone is %d"

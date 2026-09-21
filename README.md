@@ -16,7 +16,7 @@ make doctor   # what your computer is missing, with the formula for each
 make setup    # vendor toolchain: dsp56300, elektron-firmware-tool
 make os       # fetch + unpack YOUR copy of the OS -> out/os/main.bin
 make qemu     # the patched QEMU (~10-15 min)
-make          # both programs, the panel raster, a blank card
+make          # both programs, the panel raster, a blank CF card
 ```
 
 ### Run
@@ -26,8 +26,18 @@ make          # both programs, the panel raster, a blank card
 ./octdsp --in-a sin:440 --out-main out/x.wav --timeout 2  # its DSP cores, no QEMU
 ```
 
-`octemu` boots from the card image and battery file `make` leaves in
+`octemu` boots from the CF card image and battery file `make` leaves in
 `out/state/`.
+
+### Demo
+
+This will create a CF card with a simple set and project, where track 1 is
+configured with a STATIC machine and a sine wave assigned to its first slot:
+
+```sh
+make out/fx2
+./octemu --cf-card out/fx2/card.img --nvram out/fx2/nvram.bin
+```
 
 ## Firmware customizations
 
@@ -36,8 +46,8 @@ provide, using [elektron-firmware-tool][elektron-firmware-tool].
 
 > [!CAUTION]
 > I take no responsibility for any damage to your Octatrack, data loss to your
-> Compact Flash (CF) card, etc., from attempting to use these firmware
-> customizations. Be careful.
+> CF card, etc., from attempting to use these firmware customizations. Be
+> careful.
 
 ### RECEIVE machine
 
@@ -48,8 +58,8 @@ p-lock how much each track contributes to the mix, and place trigs.
 **You can create feedback loops this way.** Be careful.
 
 ```sh
-make fw-receive-amp
-./octemu --os out/receive-amp.bin
+make fw-receive
+./octemu --os out/OCTATRACK_OS1.40C_receive_<build>.os
 ```
 
 ![Configuring a RECEIVE machine in octemu](assets/receive.gif)
@@ -62,19 +72,30 @@ validation, and it seems to work. It is a mirror of the DIN ports.
 
 ```sh
 make fw-usb-midi
-./octemu --os out/usb-midi.bin --midi
+./octemu --os out/OCTATRACK_OS1.40C_usb-midi_<build>.os --midi
 ```
 
 ### USB-Audio
 
-This requires placing an extra USBAUDIO.bin file on your CF card, which is
-loaded at boot time (hold "NO" during boot to disable loading it, in case of
-error). This is still being developed, but should provide audio out over USB.
+Adds a UAC1 interface: the Octatrack appears as a 44.1 kHz stereo USB audio
+input. The source is the summed track bus, tapped pre-fader.
 
 ```sh
 make fw-usb-audio
-./octemu --os out/usb-audio.bin
+./octemu --os out/OCTATRACK_OS1.40C_usb-audio_<build>.os
 ```
+
+This one does not fit in the firmware image, so a unit needs both halves: the
+flashed image, and a payload on the CF card root under that exact name.
+
+```sh
+cp out/USBAUDIO.BIN /Volumes/OCTATRACK/
+```
+
+If you have problems, you can recover by
+
+- holding "NO" at boot (skips loading USBAUDIO.BIN).
+- deleting USBAUDIO.BIN from the CF card.
 
 ## Licensing & Legal
 

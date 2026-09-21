@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
 # usb-midi-demo.sh — the USB-MIDI end-to-end demo, both directions, on the
-# patched image (out/usb-midi.bin) against the emulator's packet bench.
+# patched image ($IMG) against the emulator's packet bench.
 #
 #   OT -> host (TX): PLAY with the sync-send gates on emits 0xFA + a 0xF8
 #     clock stream, which arrive as USB-MIDI event packets on EP2 IN.
@@ -13,8 +13,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-IMG=out/usb-midi.bin
-[ -f "$IMG" ] || { echo "build $IMG first (make out/usb-midi.bin)"; exit 1; }
+IMG=${IMG:-$(ls -t out/OCTATRACK_OS*_usb-midi_*.os 2>/dev/null | head -1)}
+[ -n "$IMG" ] || { echo "no usb-midi image — run: make fw-usb-midi" >&2; exit 1; }
 
 # ---------- OT -> host (TX): clock/transport out EP2 IN ----------
 TXSOCK=$(mktemp -u /tmp/octa-usbtx.XXXXXX)

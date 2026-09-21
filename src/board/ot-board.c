@@ -1683,6 +1683,8 @@ static uint64_t ot_usb_read(hwaddr a)
     return val;
 }
 
+static bool ot_hw_faithful;
+
 static void ot_usb_write(hwaddr a, uint64_t val)
 {
     uint32_t old = ot_usb_regs[(a - OT_USB_BASE) / 4];
@@ -1728,6 +1730,37 @@ static void ot_usb_write(hwaddr a, uint64_t val)
                 for (dir = 0; dir < 2; dir++) {
                     if ((uint32_t)val & (1u << (ep + (dir ? 16 : 0)))) {
                         uint32_t qh = eplist + (ep * 2 + dir) * 0x40u;
+                        /* A correctly initialized dQH has its token (+0x0C)
+                         * clear before the first prime — the firmware's own
+                         * EP0 setup (0x4001d65c) does exactly that. A set
+                         * ACTIVE bit here means the guest primed an endpoint
+                         * whose queue head it never cleared; on silicon the
+                         * controller acts on that stale token and the buffer
+                         * pointers beside it, which is an arbitrary DMA.
+                         * tests/usb-audio-qh-test.sh is this detector's
+                         * positive control: a detector never seen to fire
+                         * proves nothing. */
+                        if (ot_hw_faithful) {
+                            uint32_t tok = 0;
+
+                            address_space_read(&address_space_memory, qh + 0x0c,
+                                               MEMTXATTRS_UNSPECIFIED,
+                                               &tok, sizeof tok);
+                            if (tok & 0x80u) {
+                                static uint64_t said;
+
+                                if (said++ < 8) {
+                                    fprintf(stderr, "octatrack: UNINITIALIZED "
+                                            "dQH: ep%u %s primed with token "
+                                            "%#010x (ACTIVE set) at %#010x — "
+                                            "the guest never cleared this "
+                                            "queue head; on hardware the "
+                                            "controller would DMA through its "
+                                            "stale pointers\n",
+                                            ep, dir ? "IN" : "OUT", tok, qh);
+                                }
+                            }
+                        }
 
                         ot_usbh_cur_td[ep + 4 * dir] = ot_usbh_ldl(qh + 8);
                     }
@@ -2138,7 +2171,6 @@ static void ot_usbh_start(const char *path)
 #define OT_USBSTS_SRI  0x80u
 
 static bool ot_audio_tap_on;
-static bool ot_hw_faithful;
 static void ot_usb_frame_signal(void);
 static uint32_t ot_atap_produced;
 
@@ -2161,7 +2193,17 @@ static uint32_t ot_atap_produced;
  *     exercises it.
  */
 #define OT_SCRATCH_LO   0x48000000u
-#define OT_SCRATCH_HI   0x4ec94800u
+/* ☠ Past the scratch region proper, to 0x4ec94a00: the device queue-head
+ * array the USB controller owns (ENDPTLISTADDR := 0x4ec94800, programmed at
+ * 0x4001d638; 8 endpoints x 2 dirs x 0x40 B). The stock firmware initializes
+ * only the queue heads it uses, so on hardware the ones for endpoints added
+ * by a patch hold power-on garbage — and the controller is a real bus master
+ * that ACTS on those fields. Leaving them conveniently zero in the emulator
+ * is what let a partially-initialized EP3 queue head pass every gate here and
+ * corrupt image memory on a unit. tests/usb-audio-qh-test.sh depends on this
+ * poison: without it the uncleared token reads zero and the detector cannot
+ * fire. */
+#define OT_SCRATCH_HI   0x4ec94a00u
 #define OT_SCRATCH_POISON 0xa5c3a5c3u   /* not 0, not a valid pointer */
 
 static void ot_scratch_poison(void)
