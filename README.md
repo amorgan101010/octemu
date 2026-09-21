@@ -108,6 +108,12 @@ If you have problems, you can recover by
 - holding "NO" at boot (skips loading `USBAUDIO.BIN`).
 - deleting `USBAUDIO.BIN` from the CF card.
 
+**Known issues**
+
+- You may have to re-plug the USB cable.
+- Only tested on macOS with `sox`, not in a DAW.
+- Some crackles may be audible.
+
 ## Licensing & legal
 
 Elektron, Octatrack and Octatrack MKII are trademarks of Elektron Music
