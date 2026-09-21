@@ -1150,6 +1150,7 @@ int main(int argc, char **argv)
             }
         }
         fclose(wf);
+        fprintf(stderr, "octdsp: replayed %u wire transactions\n", txns);
         for (auto &p : port)
             p.collecting = g_sumEcho;
         goto replay_done;

@@ -46,9 +46,14 @@ DSPA := $(DSP)/build/source/dsp56kEmu/libdsp56kEmu.a \
         $(DSP)/build/source/dsp56kBase/libdsp56kBase.a \
         $(DSP)/build/source/asmjit/libasmjit.a
 
-CXXFLAGS := -std=c++17 -O2 -g -I$(DSP)/source -I$(DSP)/source/asmjit/src \
+# -Wall -Wextra on both programs, and both are clean under it — keep them
+# that way. ☠ -isystem, not -I, for the vendored DSP core: those headers
+# are not ours to fix and raise 58 warnings of their own under -Wextra,
+# which would bury anything this repo introduced.
+CXXFLAGS := -std=c++17 -O2 -g -Wall -Wextra \
+            -isystem $(DSP)/source -isystem $(DSP)/source/asmjit/src \
             -DDSP56300_DEBUGGER=0 -DASMJIT_STATIC
-CFLAGS   := -std=c11 -O2 -g -Wall
+CFLAGS   := -std=c11 -O2 -g -Wall -Wextra
 # Lazy (=), not immediate (:=): on a box without sdl2 an immediate expansion
 # runs pkg-config for EVERY target, so `make setup` — whose whole job is to get
 # you to a working box — would open with two pkg-config errors it cannot help.

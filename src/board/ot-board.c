@@ -994,32 +994,6 @@ static unsigned edma_esize(unsigned code)
 }
 
 /*
- * A 32-bit source element crossing to the 16-bit FlexBus port leaves as two
- * beats LOW HALF FIRST (and a 32-bit destination element reassembles port
- * beats the same way). Shipping high-half-first lands every 32-bit control
- * field one port word off inside the DSP: the mixer reads the zero CUE word
- * where the track level belongs and the master sum goes silent — while the
- * low-16 descriptor consumers still parse, which hid this for a long time.
- * The gate is the PORT-side element size: a 4-byte port element is two beats
- * (swap); 2-byte port elements (the boot module upload) cross unswapped.
- *
- * ☠ ONLY the 32-byte control minors swap. Stream, records, sum, readback and
- * upload all cross STRAIGHT — the state-6 sum is a verbatim CPU echo, and
- * swapping it measured Goertzel 0.001 broadband against 1.000 straight.
- */
-static void edma_beat_swap(uint8_t *buf, uint32_t n)
-{
-    for (uint32_t i = 0; i + 3 < n; i += 4) {
-        uint8_t a = buf[i], b = buf[i + 1];
-
-        buf[i] = buf[i + 2];
-        buf[i + 1] = buf[i + 3];
-        buf[i + 2] = a;
-        buf[i + 3] = b;
-    }
-}
-
-/*
  * True when [addr, addr+nbytes) lies entirely inside one plain-RAM region.
  *
  * Checked by TRANSLATING, never by probing with a map: address_space_map on an

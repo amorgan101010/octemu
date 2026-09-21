@@ -67,11 +67,9 @@ static bool g_screen_valid;
 /* Lamp map, measured. L<n> = bit ids 2n/2n+1; chan is which channels this
  * element shows (3 = both, additive — the meter lamps split their two channels
  * across two physical LEDs). */
-static struct {
+static const struct {
     const char *svg;
     int lamp, chan;
-    Sprite *u, *i;
-    int key;                           /* key id if this element is a key */
 } g_lampmap[] = {
     {"trig-1",0,3},{"trig-2",1,3},{"trig-3",2,3},{"trig-4",3,3},
     {"trig-5",4,3},{"trig-6",5,3},{"trig-7",6,3},{"trig-8",7,3},
@@ -96,6 +94,14 @@ static struct {
     {"led-in-c",65,1},{"led-in-d",65,2},
     {"led-int-l",66,1},{"led-int-r",66,2},
 };
+
+/* The runtime half of the map above, filled by skin_load: the two sprites
+ * each element draws with, and its key id (-1 when the element is not a
+ * key). Parallel rather than three more members of g_lampmap, because that
+ * table is measured data written three entries to a line — carrying fields
+ * it does not initialise would mean spelling out all six on every row. */
+static struct { Sprite *u, *i; int key; }
+    g_lampst[sizeof g_lampmap / sizeof *g_lampmap];
 
 static Sprite *g_pressed[64];          /* key id -> pressed sprite */
 
@@ -239,13 +245,13 @@ bool skin_load(void)
         PanelHit *h;
 
         snprintf(n, sizeof n, "%s|u", g_lampmap[i].svg);
-        g_lampmap[i].u = sprite(n);
+        g_lampst[i].u = sprite(n);
         snprintf(n, sizeof n, "%s|i", g_lampmap[i].svg);
-        g_lampmap[i].i = sprite(n);
-        g_lampmap[i].key = -1;
+        g_lampst[i].i = sprite(n);
+        g_lampst[i].key = -1;
         h = hit_by_name(g_lampmap[i].svg);
         if (h && h->kind == 0) {
-            g_lampmap[i].key = h->action;
+            g_lampst[i].key = h->action;
         }
     }
     for (uint32_t i = 0; i < g_skin.nhit; i++) {
@@ -725,14 +731,14 @@ void skin_render(void)
 
             tint[k][ch] = v > 255 ? 255 : v;
         }
-        pressed[k] = g_lampmap[k].key >= 0 &&
-                     (p.keys[g_lampmap[k].key >> 3] >>
-                      (g_lampmap[k].key & 7) & 1);
-        if ((tint[k][0] | tint[k][1] | tint[k][2]) && g_lampmap[k].u &&
+        pressed[k] = g_lampst[k].key >= 0 &&
+                     (p.keys[g_lampst[k].key >> 3] >>
+                      (g_lampst[k].key & 7) & 1);
+        if ((tint[k][0] | tint[k][1] | tint[k][2]) && g_lampst[k].u &&
             !pressed[k]) {
-            SDL_FRect d = sprite_dst(g_lampmap[k].u, 0, 0);
+            SDL_FRect d = sprite_dst(g_lampst[k].u, 0, 0);
 
-            SDL_RenderCopyF(g_ren, g_lampmap[k].u->tex, NULL, &d);
+            SDL_RenderCopyF(g_ren, g_lampst[k].u->tex, NULL, &d);
         }
     }
     for (int id = 0; id < 64; id++) {          /* held keys draw inset */
@@ -745,14 +751,14 @@ void skin_render(void)
     for (size_t k = 0; k < NLAMP; k++) {
         SDL_FRect d;
 
-        if (!(tint[k][0] | tint[k][1] | tint[k][2]) || !g_lampmap[k].i) {
+        if (!(tint[k][0] | tint[k][1] | tint[k][2]) || !g_lampst[k].i) {
             continue;
         }
-        SDL_SetTextureColorMod(g_lampmap[k].i->tex, tint[k][0], tint[k][1],
+        SDL_SetTextureColorMod(g_lampst[k].i->tex, tint[k][0], tint[k][1],
                                tint[k][2]);
-        d = sprite_dst(g_lampmap[k].i, pressed[k] ? PRESS_DX : 0,
+        d = sprite_dst(g_lampst[k].i, pressed[k] ? PRESS_DX : 0,
                        pressed[k] ? PRESS_DY : 0);
-        SDL_RenderCopyF(g_ren, g_lampmap[k].i->tex, NULL, &d);
+        SDL_RenderCopyF(g_ren, g_lampst[k].i->tex, NULL, &d);
     }
 
     /* The screen changes far more slowly than the window redraws (vsync), and

@@ -385,10 +385,6 @@ ShimCore &codecShim()
  */
 constexpr auto kDeliveryHold = std::chrono::milliseconds(250);
 
-/* 300 us is the stall's POLLING interval, not a safety net: 83% of the waits
- * inside a stalled block sit it out in full. Shortening it to 30 us was
- * measured and found nothing new to do. */
-constexpr auto kProducerWait = std::chrono::microseconds(300);
 
 /*
  * How far one core runs before the other gets the host lock.
