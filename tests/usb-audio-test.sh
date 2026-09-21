@@ -8,7 +8,7 @@
 # SCENARIO is passed through to usb-host.py (audio-validate / audio-alt /
 # audio-cadence [N] / audio-stream OUT [N]). Exits with the scenario's code.
 # The card fixture (out/usb-audio-card, carrying /USBAUDIO.BIN) is staged on
-# demand. A TRIG9-style walk can be supplied via WALK=tests/walks/foo.jsonl.
+# demand. A TRIG9-style walk can be supplied via WALK=<path to a .jsonl>.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

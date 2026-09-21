@@ -30,13 +30,13 @@ and needs no inverse tables.
 
 Neither direction is taken on faith. `--verify` runs the FORWARD encoder over
 the container inside Elektron's own `OCTATRACK_OS1.40C.bin` and requires the
-whole file back byte for byte, seed and checksum included; `make image` runs it
-before it writes anything, and every write here round-trips through the decoder
-before the file is claimed to be good.
+whole file back byte for byte, seed and checksum included; the `make fw-*`
+targets run it before they write anything, and every write here round-trips
+through the decoder before the file is claimed to be good.
 
-    elektron-firmware-tool -i stock.syx -c 3 mainos.bin -V OEMUabc123 \\
+    elektron-firmware-tool -i stock.syx -c 3 mainos.bin -V OE-abc123 \\
         --emit-container elek.bin -o out.syx
-    python3 custom/make-bin.py elek.bin -o OCTATRACK_OEMUabc123.bin
+    python3 custom/make-bin.py elek.bin -o OCTATRACK_OE-abc123.bin
     python3 custom/make-bin.py --verify downloads/extracted/OCTATRACK_OS1.40C.bin
 """
 import argparse

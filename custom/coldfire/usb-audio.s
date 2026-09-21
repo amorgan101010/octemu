@@ -108,7 +108,7 @@
 .set AUD_TARGET,   2048         | fill the servo steers towards
 .set AUD_BAND,     512          | deadband, so it does not hunt
 
-.set CACR_ICINVA,  0xa40ce100       | steady-state CACR + ICINVA (FREE-SPACE.md)
+.set CACR_ICINVA,  0xa40ce100       | steady-state CACR + ICINVA
 | The firmware's own device attach/detach — usb_attach(1) attaches,
 | usb_attach(0) detaches; USB DISK MODE uses it on entry and exit.
 .set USB_ATTACH,   0x4001eb44
@@ -732,7 +732,6 @@ audio_clamp2_shim:
 | exist so a payload can install a SUBSET of the hooks, which is how a
 | hardware fault gets bisected by copying one file to the card instead of
 | reflashing — the whole point of the self-describing payload header.
-| tests/usb-audio-bisect.sh builds the set.
 usbaudio_patches:
 .if PATCH_USB
     .long 0x4001e606, exp_isr,      pat_isr,      6
@@ -859,7 +858,7 @@ usbaudio_primed:   .byte 0          | the startup cushion has been built
 | descriptor it found was not ACTIVE). Above ACR0's 0x40000000-0x47FFFFFF
 | window the default CACR data mode is inhibited, so stores here reach RAM
 | with no cache maintenance at all. 0x49000000 is write-verified clean on
-| hardware (custom/coldfire/memtest-probe.s, two patterns).
+| hardware (a standalone memtest payload, two patterns).
 .set usbaudio_dtd,    DMA_FIXED
 .set usbaudio_pktbuf, DMA_FIXED + 64
 .else

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Canary stamp/check over the QEMU gdbstub — the placement verdict tool of
-plans/sdram-occupancy-verify.md.
+"""Canary stamp/check over the QEMU gdbstub — how a region of guest memory is
+shown to be free for something else to live in.
 
 Stamps a deterministic pattern (word at A = A ^ 0xC3A5965A, so verification
 needs no stored copy) over slices of guest memory, records exactly what was

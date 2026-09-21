@@ -8,8 +8,9 @@ Unlike usb-midi (which revived dormant firmware), there is NO audio-streaming
 code in the OS, and the new code (four grown config descriptors + the EP3 iso
 servicing) is far larger than the ~408 B of image free space usb-midi leaves.
 So the payload lives on the CF card as /USBAUDIO.BIN, is copied at runtime into
-the canary-verified SDRAM scratch region (0x48001000), and runs there — the
-technique proven in docs/FREE-SPACE.md.
+the canary-verified SDRAM scratch region (0x48001000), and runs there. The
+region was chosen by stamping guest memory and re-reading it (tests/canary.py),
+not by assumption.
 
 Two pieces are assembled:
 
@@ -43,8 +44,8 @@ BASE = 0x40000400
 # ☠ HARDWARE-MEASURED, not canary-derived. 0x48001000 was wrong: on a real
 # unit, writes past ~0x48003000 destroy image code, and 0x48010000 is so badly
 # occupied that the corruption takes out the exception screen's own display.
-# 0x49000000 write-verified clean for 256 KB on hardware
-# (custom/coldfire/memtest-probe.s). ☠ Re-measure before moving this again.
+# 0x49000000 write-verified clean for 256 KB on hardware, by a standalone
+# two-pattern memtest payload. ☠ Re-measure before moving this again.
 SCRATCH = 0x49000000                    # payload load address in SDRAM scratch
 # ☠ These three are facts, not choices. Every other value has been tried on a
 # unit and failed:
@@ -75,8 +76,8 @@ PAYLOAD_HDR = 28                        # self-describing header, see below
 #       compute the fixup delta without a build-time constant of its own
 PAYLOAD_MAGIC = 0x4F54504C              # 'OTPL'
 PAYLOAD_MAX = 0x10000                   # largest card blob the trampoline loads
-# The image free slack after usb-midi's overlay (docs/FREE-SPACE.md zone
-# 0x400d24d0; usb-midi occupies up to 0x400d2b44, leaving 408 B to 0x400d2cdc).
+# The image free slack after usb-midi's overlay (zone 0x400d24d0; usb-midi
+# occupies up to 0x400d2b44, leaving 408 B to 0x400d2cdc).
 ZONE_TRAMP = 0x400D2B44
 ZONE_END = 0x400D2CDC
 ASM = os.path.join(ROOT, "custom/coldfire/usb-audio.s")
@@ -112,12 +113,12 @@ ASM_TRAMP = os.path.join(ROOT, "custom/coldfire/usb-audio-tramp.s")
 # expect() guard caught when this was first placed there.
 ASM_GUARD = os.path.join(ROOT, "custom/coldfire/usb-audio-guard.s")
 # ☠ The on-screen reporter needs its own zone: the trampoline's has tens of
-# bytes left, not hundreds. 199 B free at 0x400c14d5 (docs/FREE-SPACE.md).
+# bytes left, not hundreds. 199 B free at 0x400c14d5.
 ASM_REPORT = os.path.join(ROOT, "custom/coldfire/usb-audio-report.s")
 ZONE_REPORT = 0x400C14D5
 ZONE_REPORT_END = 0x400C159C
 # ☠ The page allocator needs its own zone too; the trampoline's has single
-# digits of slack. 150 B free at 0x400d3da2 (docs/FREE-SPACE.md).
+# digits of slack. 150 B free at 0x400d3da2.
 ASM_ALLOC = os.path.join(ROOT, "custom/coldfire/usb-audio-alloc.s")
 ZONE_ALLOC = 0x400D3DA2
 ZONE_ALLOC_END = 0x400D3E38
@@ -474,16 +475,16 @@ def main():
     # ☠ Max sectors per fs_read call. ONE.
     #
     # The only transfer size ever PROVEN to land at the requested address is a
-    # single sector: custom/coldfire/alias-probe.s (132 B, 1 sector) validated and executed
-    # from 0x48001000 on hardware. 8 sectors was briefly set here on the
-    # strength of a 4 KB probe "booting fine" — but that probe was built to be
+    # single sector: a 132-byte (one-sector) probe payload validated and
+    # executed from 0x48001000 on hardware. 8 sectors was briefly set here on
+    # the strength of a 4 KB probe "booting fine" — but that probe was built to be
     # REJECTED on its length check, so booting proved only that the misplaced
     # write missed anything fatal, NOT that the data arrived. It did not: an
     # 8-sector-chunked load still overwrote the OS image and crashed the unit.
     #
-    # ☠ Do not raise this without a probe that LANDS AND EXECUTES at that size
-    # (tests/usb-audio-probe.py builds them). "The machine booted" is not
-    # evidence that a read went where it was asked to.
+    # ☠ Do not raise this without a probe that LANDS AND EXECUTES at that
+    # size. "The machine booted" is not evidence that a read went where it was
+    # asked to.
     READ_CHUNK = 1
     tdefs = {"PAYLOAD_BASE": SCRATCH, "PAYLOAD_MAGIC": PAYLOAD_MAGIC,
              "PAYLOAD_MAX": PAYLOAD_MAX, "READ_CHUNK": READ_CHUNK}

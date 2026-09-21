@@ -998,36 +998,10 @@ int ot_dspcore_hreq(void)
     return g_shim[0].c->hdi().hasTX() ? 1 : 0;
 }
 
-/* DIAGNOSTIC (throwaway): dump both cores' X/Y/P at exit, in the layout the
- * older out/dspmem-*.bin files use (three 0x40000-word u32 sections per
- * core), so octdsp --fx-run reads them unchanged. */
-static void ot_dump_dsp_memory(void)
-{
-    for (unsigned i = 0; i < 2; i++) {
-        char path[64];
-        snprintf(path, sizeof path, "out/dspmem-%d-c%u.bin", (int)getpid(), i);
-        FILE *f = fopen(path, "wb");
-        if (!f)
-            continue;
-        const dsp56k::EMemArea areas[3] = {
-            dsp56k::MemArea_X, dsp56k::MemArea_Y, dsp56k::MemArea_P };
-        for (int a = 0; a < 3; a++) {
-            for (uint32_t w = 0; w < 0x40000; w++) {
-                uint32_t v = g_chip.core[i].mem->get(areas[a], w) & 0xffffff;
-                fwrite(&v, 4, 1, f);
-            }
-        }
-        fclose(f);
-        fprintf(stderr, "ot-dsp: dumped %s\n", path);
-    }
-}
-
 void ot_dsp_stats(char *buf, size_t len)
 {
     const uint64_t nb = g_blocks ? g_blocks : 1;
     size_t o;
-
-    ot_dump_dsp_memory();
 
     o = (size_t)snprintf(buf, len,
              "throttle=%s ilv=%u blocks=%llu renders=%llu esai_blocks=%llu ship_nz=%llu "

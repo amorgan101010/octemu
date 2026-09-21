@@ -19,6 +19,9 @@ make qemu     # the patched QEMU (~10-15 min)
 make          # both programs, the panel raster, a blank CF card
 ```
 
+`make setup` and `make qemu` clone their dependencies into `vendor/`, which
+ends up around 1.2 GB.
+
 ### Run
 
 ```sh
@@ -26,8 +29,12 @@ make          # both programs, the panel raster, a blank CF card
 ./octdsp --in-a sin:440 --out-main out/x.wav --timeout 2  # its DSP cores, no QEMU
 ```
 
-`octemu` boots from the CF card image and battery file `make` leaves in
-`out/state/`.
+`octemu` boots from the CF card image `make` leaves in `out/state/`, and writes
+its battery file alongside on the first run.
+
+**Known issues**
+
+The playback warbles. I think this can be fixed by buffering.
 
 ### Demo
 
@@ -35,9 +42,14 @@ This will create a CF card with a simple set and project, where track 1 is
 configured with a STATIC machine and a sine wave assigned to its first slot:
 
 ```sh
-make out/fx2
-./octemu --cf-card out/fx2/card.img --nvram out/fx2/nvram.bin
+make fixtures
+cp -R out/fx2 out/play
+./octemu --cf-card out/play/card.img --nvram out/play/nvram.bin
 ```
+
+Work on the copy: `out/fx2` is a cached fixture tests start from, and anything
+you save in the emulator writes straight back into it. Delete `out/fx2` to
+rebuild it.
 
 ## Firmware customizations
 
@@ -82,7 +94,6 @@ input. The source is the summed track bus, tapped pre-fader.
 
 ```sh
 make fw-usb-audio
-./octemu --os out/OCTATRACK_OS1.40C_usb-audio_<build>.os
 ```
 
 This one does not fit in the firmware image, so a unit needs both halves: the
@@ -94,10 +105,10 @@ cp out/USBAUDIO.BIN /Volumes/OCTATRACK/
 
 If you have problems, you can recover by
 
-- holding "NO" at boot (skips loading USBAUDIO.BIN).
-- deleting USBAUDIO.BIN from the CF card.
+- holding "NO" at boot (skips loading `USBAUDIO.BIN`).
+- deleting `USBAUDIO.BIN` from the CF card.
 
-## Licensing & Legal
+## Licensing & legal
 
 Elektron, Octatrack and Octatrack MKII are trademarks of Elektron Music
 Machines MAV AB. This project is unaffiliated with and unendorsed by them.

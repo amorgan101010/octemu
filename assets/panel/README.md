@@ -93,7 +93,7 @@ JSON gives each knob's base centre (`cx,cy,r`) and **top-face** centre
 - Overlay frames by positioning a canvas over that rect, or by inserting an
   `<image>`/`<foreignObject>` at those coordinates inside the SVG. For crisp
   128x64 pixels, scale with `image-rendering: pixelated`.
-- The bezel print ("8 Track Dynamic Performance Sampler", "Octatrack MKII") is
+- The bezel print ("8 Track Dynamic Performance Sampler", "Octemu MKII") is
   outside the cutout; leave it.
 
 ## Invariants worth keeping

@@ -22,8 +22,8 @@ brew "python@3.12"        # need:python3     the build and test scripts
 brew "mtools"             # need:mformat     creates and fills card images
 
 # make panel: rasterizing the panel skin
-brew "librsvg"            # want:rsvg-convert  make panel: the panel skin
-brew "imagemagick"        # want:magick        make panel: the panel skin
+brew "librsvg"            # need:rsvg-convert  the panel skin (make panel)
+brew "imagemagick"        # need:magick        the panel skin (make panel)
 
 # --recording out.mov: muxing video and audio
 brew "ffmpeg"             # want:ffmpeg      --recording to .mov

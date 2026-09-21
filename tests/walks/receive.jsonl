@@ -1,6 +1,6 @@
 # The RECEIVE walk: what assets/receive.gif is a recording of. It needs the
-# customized image — out/receive-amp.bin, from 'make fw-receive-amp', the
-# variant whose trigs shape the machine's volume — and starts from
+# customized image — the RECEIVE build from 'make fw-receive', which carries
+# the amp envelope whose trigs shape the machine's volume — and starts from
 # the out/fx fixture, the same set and empty project the demo walk uses:
 #
 #   the machine list, where RECEIVE stands in NEIGHBOR's slot
@@ -9,9 +9,7 @@
 #   record mode, every one of the sixteen steps at once, and a bar of it
 #
 # Record it with:
-#   tests/build-fixture.sh
-#   make fw-receive-amp
-#   make receive-gif
+#   make receive-gif        (builds the fixture and the image it needs)
 #
 # ☠ RECEIVE is on TRACK 1 deliberately. Stock NEIGHBOR refuses tracks 1 and 5,
 # having no predecessor inside a DSP core's group of four; RECEIVE running

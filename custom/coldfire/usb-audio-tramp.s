@@ -1,9 +1,9 @@
 | SPDX-License-Identifier: MIT
 | usb-audio-tramp.s — the in-image trampoline for the USB-audio payload.
 |
-| Linked by custom/usb-audio.py into the 408 B of image free space left
-| after usb-midi's overlay (0x400d2b44, docs/FREE-SPACE.md). It is the ONLY
-| new code that lives in the image; everything else runs from SDRAM scratch.
+| Linked by custom/usb-audio.py into the 408 B of image free space left after
+| usb-midi's overlay (0x400d2b44). It is the ONLY new code that lives in the
+| image; everything else runs from SDRAM scratch.
 |
 | Hooked into fs_card_detect_poll (0x4003f174), a task-context leaf polled by
 | the card/UI task — task context is required because loading the payload does
@@ -25,12 +25,12 @@
 .set FS_READ,   0x46c82426          | fs vtable: read(fid, buf, len) -> got
 .set FS_CLOSE,  0x46c82422          | fs vtable: close(fid)
 .set MODE_R,    0x400b3289          | the "r" string the firmware opens with
-.set CACR_ICINVA, 0xa40ce100        | steady-state CACR + ICINVA (FREE-SPACE.md)
+.set CACR_ICINVA, 0xa40ce100        | steady-state CACR + ICINVA
 | ☠ Hold NO while the card mounts and the payload is never loaded at all —
 | recovery without pulling the card or deleting a file. panel_key_state
 | (0x46100b18) is 8 debounced key-group bytes: group = id/8, bit = id%8, and
 | NO is key id 50 -> byte +6, bit 2. MEASURED, not derived: holding NO reads
-| 00 00 00 00 00 00 04 00 and all zero on release (tests/walks/rsp-hold-no.jsonl).
+| 00 00 00 00 00 00 04 00 and all zero on release.
 .set PANEL_KEY_NO,  0x46100b1e      | panel_key_state + 6
 .set PANEL_KEY_NO_B, 2              | NO = id 50, 50 % 8
 | ☠ The card mounts BEFORE the key subsystem is alive, so checking NO at
@@ -38,7 +38,7 @@
 | loaded anyway). Gate the whole load on the UI key handler list instead —
 | BSS-cleared at boot, non-zero only once ui_task has registered handlers.
 | That is observable guest state, not a tuned delay, and it also moves the
-| copy to where docs/FREE-SPACE.md says it belongs: after the UI is up.
+| copy to where it belongs: after the UI is up.
 .set UI_KEY_LIST,   0x460d165c      | ui_key_handler_list; 0 until UI is up
 | The firmware's own dismissible on-screen notification: popup(str, kind).
 | Args pushed right-to-left (`pea kind; pea str; jsr`), kind 0x30 is the

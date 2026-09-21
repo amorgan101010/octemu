@@ -15,7 +15,12 @@ OS_VER  ?= 1.40C
 # uncommitted it would be a lie, so a dirty tree builds as SNAPSHOT instead.
 BUILD   ?= $(shell git diff --quiet HEAD 2>/dev/null && \
                    git rev-parse --short=6 HEAD 2>/dev/null || echo SNAPSHOT)
-VERSION ?= OEMU-$(BUILD)
+# ☠ The ELEK version field holds TEN bytes, and the firmware tool silently
+# leaves the STOCK version in place when it is handed more — a flashed unit
+# then reports 1.40C with nothing to say the custom OS landed. "OE-" plus a
+# 6-char sha is 9; the truncation is the backstop for any longer BUILD
+# (SNAPSHOT, or an override passed on the command line).
+VERSION ?= $(shell printf %.10s "OE-$(BUILD)")
 STOCKSYX = downloads/extracted/OCTATRACK_OS$(OS_VER).syx
 STOCKBIN = downloads/extracted/OCTATRACK_OS$(OS_VER).bin
 EFT      = vendor/elektron-firmware-tool/elektron-firmware-tool
@@ -70,7 +75,7 @@ all: octdsp octemu panel card
         test-emu-usb-audio-enum test-emu-usb-audio-alt \
         test-emu-usb-audio-cadence test-emu-usb-audio-stream \
         test-emu-usb-audio-safety \
-        fw-all fw-receive fw-usb-midi fw-usb-audio clean
+        fw-all fw-receive fw-usb-midi fw-usb-audio clean distclean
 
 # ---------------------------------------------------------------- preflight --
 # scripts/doctor.sh reads the Brewfile, so the dependency list lives in exactly
@@ -161,7 +166,7 @@ out/fx2/card.img out/fx2/nvram.bin: octemu $(QEMU) $(IMG) \
 # reduction is a box average in the emulator rather than a lanczos in ffmpeg.
 demo-gif: octemu $(QEMU) $(IMG) out/panel/panel.bin \
           out/fx/card.img tests/walks/demo.jsonl
-	@echo "== assets/demo.gif: the demo walk, about 2 min =="
+	@echo "== assets/demo.gif: the demo walk, about 30 s =="
 	@rm -rf out/demo && mkdir -p out/demo
 	@cp out/fx/card.img out/fx/nvram.bin out/demo/
 	./octemu --cf-card out/demo/card.img --nvram out/demo/nvram.bin \
@@ -397,5 +402,18 @@ $(USBAUDIO).os: custom/usb-audio.py custom/coldfire/usb-audio.s \
 # the only guidance a user gets, so keep them accurate: back up the card, copy
 # to the card ROOT, eject properly, PROJECT -> OS UPGRADE.
 
+# ------------------------------------------------------------------- clean --
+# `clean` takes out what a rebuild replaces in seconds: the two programs, any
+# debug bundle beside them (including ones left by an older binary name), and
+# the generated panel sources. It deliberately spares out/ — the card fixtures
+# in there cost three minutes of emulated Octatrack to rebuild, and
+# out/os/main.bin is unpacked from YOUR copy of the firmware.
 clean:
-	rm -f octdsp octemu
+	rm -f octdsp octemu src/*.o src/board/*.o
+	rm -rf *.dSYM
+	rm -f assets/panel/octatrack.svg assets/panel/octatrack-elements.json
+
+# Back to a fresh checkout. `make setup qemu os` puts it all back, at the cost
+# of re-cloning the ~1.2 GB of vendored sources and re-fetching the OS.
+distclean: clean
+	rm -rf out vendor downloads

@@ -35,9 +35,9 @@ echo "   ok: three archives, object code"
 
 echo "== elektron-firmware-tool =="
 EFT=vendor/elektron-firmware-tool
-# Pinned, like the other two dependencies, because `make image` depends on this
-# tool's CLI and on how it rebuilds a container — both of which have changed
-# upstream before. EFT_PIN= tracks HEAD instead, deliberately.
+# Pinned, like the other two dependencies, because the `make fw-*` targets
+# depend on this tool's CLI and on how it rebuilds a container — both of which
+# have changed upstream before. EFT_PIN= tracks HEAD instead, deliberately.
 EFT_PIN=${EFT_PIN-a5bce9a6af644386d900924082993a805e812874}
 if [ ! -d "$EFT" ]; then
     git clone https://github.com/mischa85/elektron-firmware-tool "$EFT"
@@ -51,7 +51,7 @@ fi
 # pin above and need no patching: the ELEK version field is the full 10-byte
 # run from container offset 0x08 (not just the alphanumeric tail at 0x0D), and
 # `--emit-container` writes the rebuilt container out for custom/make-bin.py to
-# wrap for the CF-card ELUP path. If a future pin loses either, `make image`
+# wrap for the CF-card ELUP path. If a future pin loses either, `make fw-*`
 # says so rather than writing a bad file.
 rm -f "$EFT/elektron-firmware-tool"
 if [ -f "$EFT/Makefile" ]; then
@@ -60,7 +60,7 @@ else
     cc -O2 -o "$EFT/elektron-firmware-tool" "$EFT"/*.c
 fi
 "$EFT/elektron-firmware-tool" -h 2>&1 | grep -q -- "--emit-container" || {
-    echo "   this elektron-firmware-tool has no --emit-container; 'make image'" >&2
-    echo "     needs it. Pin EFT_PIN to a commit that has it." >&2
+    echo "   this elektron-firmware-tool has no --emit-container; the" >&2
+    echo "     'make fw-*' targets need it. Pin EFT_PIN to a commit that has it." >&2
     exit 1; }
 echo "   ok: $EFT/elektron-firmware-tool"
