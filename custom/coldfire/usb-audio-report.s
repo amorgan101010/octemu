@@ -1,8 +1,8 @@
 | SPDX-License-Identifier: MIT
 | usb-audio-report.s — on-screen status for the payload install.
 |
-| Lives in its own image free zone (199 B at 0x400c14d5) because the
-| trampoline's zone has only tens of bytes left.
+| Lives in its own image free zone (199 B at 0x400c14d5, measured) because
+| the trampoline's zone has only tens of bytes left.
 |
 | ☠ WHY THIS EXISTS. Every reason the trampoline declines a card payload was
 | SILENT: the machine boots perfectly and simply has no USB audio, which is

@@ -1153,9 +1153,39 @@ static uint64_t ot_rb_writes, ot_rb_bytes;
 static uint32_t ot_rb_seen[8];          /* first distinct (daddr,nbytes) shapes */
 static unsigned ot_rb_nseen;
 
+/* Readback DUMP (OCTA_RB_DUMP=path): every write into the readback arena,
+ * verbatim, as records of u32 BE daddr, u32 BE nbytes, then the bytes. The
+ * per-track oracle for the 16-channel USB stream: the payload's producer
+ * reads exactly these slots, so a verifier can require each USB channel pair
+ * to equal its track sample-exact (tests/usb-audio-sigcheck.py). */
+static FILE *ot_rb_dump_fp;
+static int ot_rb_dump_state = -1;
+
+static void ot_rb_dump(uint32_t daddr, const uint8_t *buf, uint32_t nbytes)
+{
+    uint8_t h[8];
+
+    if (ot_rb_dump_state < 0) {
+        const char *path = getenv("OCTA_RB_DUMP");
+
+        ot_rb_dump_fp = path ? fopen(path, "wb") : NULL;
+        ot_rb_dump_state = ot_rb_dump_fp != NULL;
+    }
+    if (!ot_rb_dump_state || daddr + nbytes <= OT_RB_BASE ||
+        daddr >= OT_RB_BASE + OT_RB_SPAN) {
+        return;
+    }
+    stl_be_p(h, daddr);
+    stl_be_p(h + 4, nbytes);
+    fwrite(h, 1, sizeof h, ot_rb_dump_fp);
+    fwrite(buf, 1, nbytes, ot_rb_dump_fp);
+    /* ☠ No per-write fflush: it fires ~2756x/s and throttles the emulator. */
+}
+
 static void ot_rb_tap(uint32_t daddr, uint32_t saddr, int16_t soff,
                       const uint8_t *buf, uint32_t nbytes)
 {
+    ot_rb_dump(daddr, buf, nbytes);
     if (ot_rb_on < 0) {
         ot_rb_on = getenv("OCTA_RB_LOG") != NULL;
     }
@@ -1603,6 +1633,9 @@ static void ot_usb_notify(const char *what)
 #define OT_EPFLUSH    0xFC0B01B4u
 #define OT_EPSR       0xFC0B01B8u
 #define OT_EPCOMPLETE 0xFC0B01BCu
+#define OT_EPCTRL0    0xFC0B01C0u
+#define OT_EPCTRL_RXS 0x00000001u     /* EP0 OUT stall */
+#define OT_EPCTRL_TXS 0x00010000u     /* EP0 IN stall  */
 
 #define OT_USBSTS_UI  0x01u
 #define OT_USBSTS_PCI 0x04u
@@ -1613,6 +1646,7 @@ static qemu_irq ot_usb_irq;
 static uint32_t ot_usb_otgsc_is;      /* latched interrupt status bits */
 
 static void ot_usbh_try(void);        /* the packet bench, below */
+static void ot_usbh_stall_check(void); /* EP0 STALL answers a pending op */
 static bool ot_usbh_enabled(void);
 static bool ot_usbh_speed_hs;
 static uint32_t ot_usbh_ldl(uint32_t a);
@@ -1749,6 +1783,15 @@ static void ot_usb_write(hwaddr a, uint64_t val)
             *ot_usb_reg(OT_EPSR) &= ~(uint32_t)val;
             *ot_usb_reg(OT_EPFLUSH) = 0;
             return;
+        case OT_EPCTRL0:
+            /* ☠ A STALL on EP0 is an ANSWER, not silence: the stock control
+             * handler stalls every request it does not recognise, and a UAC2
+             * host treats that stall as "unsupported". Before this the bench
+             * never replied to the host's IN, so a stalled request and a hung
+             * guest looked identical. */
+            *ot_usb_reg(a) = val;
+            ot_usbh_stall_check();
+            return;
         default:
             break;
         }
@@ -1814,6 +1857,25 @@ static size_t ot_usbh_line_len;
 static bool ot_usbh_enabled(void)
 {
     return ot_usbh_path != NULL;
+}
+
+static void ot_usbh_reply(const char *fmt, ...);
+
+/* The controller answers the host's next EP0 IN/OUT with a STALL while the
+ * stall bit is set; the bench reports it as "in 0 stall"/"out 0 stall". The
+ * bits clear on the next SETUP, as the Chipidea core does. */
+static void ot_usbh_stall_check(void)
+{
+    uint32_t c = *ot_usb_reg(OT_EPCTRL0);
+
+    if ((c & OT_EPCTRL_TXS) && ot_usbh_in[0].pending) {
+        ot_usbh_in[0].pending = false;
+        ot_usbh_reply("in 0 stall\n");
+    }
+    if ((c & OT_EPCTRL_RXS) && ot_usbh_out[0].pending) {
+        ot_usbh_out[0].pending = false;
+        ot_usbh_reply("out 0 stall\n");
+    }
 }
 
 static uint32_t ot_usbh_ldl(uint32_t a)
@@ -1888,6 +1950,13 @@ static void ot_usbh_service(int ep, bool dir_in)
     static uint8_t buf[OT_USBH_MAX];
     int moved = 0;
 
+    /* ☠ ISOCHRONOUS endpoints send exactly ONE dTD per poll. Walking the
+     * chain as one transfer is bulk (MSC) semantics; applied to linked iso
+     * dTDs it merged two packets and desynced the guest's queue from the
+     * bench's cursor until the stream hung. Type comes from ENDPTCTRLn. */
+    const uint32_t epctrl = *ot_usb_reg(OT_EPCTRL0 + 4u * ep);
+    const bool iso = ((dir_in ? epctrl >> 18 : epctrl >> 2) & 3u) == 1u;
+
     if (dir_in) {
         OtUsbhIn *op = &ot_usbh_in[ep];
 
@@ -1905,7 +1974,8 @@ static void ot_usbh_service(int ep, bool dir_in)
             ot_usbh_stl(td + 4, ((uint32_t)(total - n) << 16) |
                                 (token & 0x8000u));
             td = ot_usbh_ldl(td);
-            if (total < 64) {          /* short packet ends the transfer */
+            if (iso || total < 64) {   /* one packet per poll; a short
+                                          packet ends a bulk transfer */
                 break;
             }
         }
@@ -2018,6 +2088,8 @@ static void ot_usbh_cmd(char *line)
             address_space_write(&address_space_memory, eplist + 0x28,
                                 MEMTXATTRS_UNSPECIFIED, rev, 8);
         }
+        /* a new SETUP clears an EP0 stall, as on the real core */
+        *ot_usb_reg(OT_EPCTRL0) &= ~(OT_EPCTRL_TXS | OT_EPCTRL_RXS);
         *ot_usb_reg(OT_EPSETUPSR) |= 1u;
         *ot_usb_reg(OT_USBSTS) |= OT_USBSTS_UI;
         ot_usb_irq_update();
@@ -2029,6 +2101,7 @@ static void ot_usbh_cmd(char *line)
         ep &= 3;
         ot_usbh_in[ep].pending = true;
         ot_usbh_in[ep].want = MIN(want, OT_USBH_MAX);
+        ot_usbh_stall_check();
         ot_usbh_try();
     } else if (strncmp(line, "out ", 4) == 0) {
         int ep = 0;
@@ -2041,6 +2114,7 @@ static void ot_usbh_cmd(char *line)
                                                OT_USBH_MAX) : 0;
         ot_usbh_out[ep].off = 0;
         ot_usbh_out[ep].pending = true;
+        ot_usbh_stall_check();
         ot_usbh_try();
     } else if (strncmp(line, "reset", 5) == 0) {
         *ot_usb_reg(OT_DEVICEADDR) = 0;

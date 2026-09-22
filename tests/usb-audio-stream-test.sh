@@ -9,14 +9,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# the firmware images carry a build id in their names, so find them
-OSIMG=${OSIMG:-$(ls -t out/OCTATRACK_OS*_usb-audio_*.os 2>/dev/null | head -1)}
-[ -n "$OSIMG" ] || { echo "no usb-audio image — run: make fw-usb-audio" >&2; exit 1; }
-
-IMG=$OSIMG
+IMG=${IMG:-$(ls -t out/OCTATRACK_OS*_usb-audio_*.os 2>/dev/null | head -1)}
 CARD=out/usb-audio-card
 OUT=out/usb-audio-p4
-[ -f "$IMG" ] || { echo "build $IMG first"; exit 1; }
+[ -n "$IMG" ] && [ -f "$IMG" ] || { echo "no usb-audio image — run: make fw-usb-audio" >&2; exit 1; }
 # ☠ Restage whenever the payload is newer than the card. The trampoline's
 # checksum gate REJECTS a card whose blob does not match this image (by
 # design), so a stale fixture silently degrades the machine to the stock
@@ -55,7 +51,10 @@ done
 grep -q '\[mark\].*ready' "$LOG" || { echo "no ready"; tail -8 "$LOG"; exit 1; }
 
 # Capture the iso stream until a burst is in hand.
-timeout 150 python3 tests/usb-host.py "$SOCK" audio-stream "$OUT/iso.pcm" \
+# ☠ FULL SPEED: this gate checks the stereo-sum path (the full-speed stream)
+# against --recording. The high-speed stream is sixteen channels and has its
+# own oracle, tests/usb-audio-stream16-test.sh.
+timeout 150 python3 tests/usb-host.py "$SOCK" audio-stream "$OUT/iso.pcm" fs \
     || { echo "capture failed (no burst caught)"; exit 1; }
 
 # Stop the machine FIRST so the recording's header is finalized, then compare.

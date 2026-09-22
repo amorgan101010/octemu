@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 # usb-audio-card.sh — stage a CF card fixture carrying the USB-audio payload.
 #
-# Copies the fx2 fixture (card.img + nvram.bin) to DST and injects the payload
+# Copies a fixture (out/fx2 by default, SRC=... to choose) to DST and injects the payload
 # blob as /USBAUDIO.BIN at the card root, where custom/coldfire/usb-audio-tramp.s reads it.
 # scripts/card.py writes into the image with mtools — no mount, no root.
 #
@@ -12,7 +12,7 @@ cd "$(dirname "$0")/.."
 
 DST=${1:?usage: usb-audio-card.sh DST [PAYLOAD]}
 PAYLOAD=${2:-out/USBAUDIO.BIN}
-SRC=out/fx2
+SRC=${SRC:-out/fx2}         # the fixture to start from (out/sig8 for the 16-channel gate)
 [ -f "$PAYLOAD" ] || { echo "missing $PAYLOAD (make fw-usb-audio)"; exit 1; }
 [ -f "$SRC/card.img" ] || { echo "missing $SRC/card.img"; exit 1; }
 

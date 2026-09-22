@@ -293,6 +293,10 @@ test-usb-midi: octemu $(QEMU) $(USBMIDI).os out/fx2/card.img
 # interface + iso IN endpoint, MSC + MIDI descriptors still intact.
 test-emu-usb-audio-enum: octemu $(QEMU) $(USBAUDIO).os out/fx2/card.img
 	tests/usb-audio-test.sh audio-validate
+	tests/usb-audio-test.sh audio-validate fs
+
+test-emu-usb-audio-ctrl: octemu $(QEMU) $(USBAUDIO).os out/fx2/card.img
+	tests/usb-audio-test.sh audio-uac2-ctrl
 
 # P2 — SET_INTERFACE(3, alt 1) brings the EP3 iso stream up (a packet flows),
 # alt 0 tears it down (the endpoint goes idle).
@@ -302,6 +306,7 @@ test-emu-usb-audio-alt: octemu $(QEMU) $(USBAUDIO).os out/fx2/card.img
 # P3 — the 44.1 kHz iso cadence: every packet 176/180 B, 441 frames per 10.
 test-emu-usb-audio-cadence: octemu $(QEMU) $(USBAUDIO).os out/fx2/card.img
 	tests/usb-audio-test.sh audio-cadence 200
+	tests/usb-audio-test.sh audio-cadence 200 fs
 
 # P4 — the stream is real, continuous, guest-produced audio over a TRIG9 burst:
 # the fixture's tone, unbroken through the sustain, at a level that tracks the
@@ -310,6 +315,13 @@ test-emu-usb-audio-cadence: octemu $(QEMU) $(USBAUDIO).os out/fx2/card.img
 # exactly what it asserts and why each assertion can fail.
 test-emu-usb-audio-stream: octemu $(QEMU) $(USBAUDIO).os out/fx2/card.img
 	tests/usb-audio-stream-test.sh
+
+# P4b — the 16-channel high-speed stream on the signature fixture: every USB
+# channel carries its own tone (channel c = 200+50*c Hz, so the track order
+# and L/R are proven positively), and every channel pair equals its track's
+# post-FX readback sample-exact against the emulator's readback dump.
+test-emu-usb-audio-stream16: octemu $(QEMU) $(USBAUDIO).os out/sig8/card.img
+	tests/usb-audio-stream16-test.sh
 
 # P5 — the RECOVERY gate, and the one that governs whether this may be
 # flashed at all: deleting /USBAUDIO.BIN from the card is the ONLY recovery
@@ -320,17 +332,34 @@ test-emu-usb-audio-safety: octemu $(QEMU) $(USBAUDIO).os out/fx2/card.img
 	tests/usb-audio-safety-test.sh
 
 # The whole USB-audio regression suite. Sequential, like test-usb-midi.
-test-usb-audio: octemu $(QEMU) $(USBAUDIO).os out/fx2/card.img
+# Each gate is timed (tests/gate-time.sh prints "== N s: gate" after it), so
+# the suite's wall-clock cost — a cold emulator boot per gate, fixed guest-time
+# waits, pure-Python capture analysis — is a list of numbers to work down.
+GATE = tests/gate-time.sh
+test-usb-audio: octemu $(QEMU) $(USBAUDIO).os out/fx2/card.img out/sig8/card.img
 	@python3 tests/lint-gates.py
-	tests/usb-audio-safety-test.sh
-	tests/usb-audio-qh-test.sh
-	tests/usb-audio-test.sh audio-validate
-	tests/usb-audio-test.sh audio-alt
-	tests/usb-audio-test.sh audio-cadence 200
-	tests/usb-audio-stream-test.sh
-	tests/usb-audio-durability-test.sh
-	tests/usb-audio-guard-test.sh
+	$(GATE) tests/usb-audio-safety-test.sh
+	$(GATE) tests/usb-audio-qh-test.sh
+	$(GATE) tests/usb-audio-test.sh audio-validate
+	$(GATE) tests/usb-audio-test.sh audio-validate fs
+	$(GATE) tests/usb-audio-test.sh audio-uac2-ctrl
+	$(GATE) tests/usb-audio-test.sh audio-alt
+	$(GATE) tests/usb-audio-test.sh audio-cadence 200
+	$(GATE) tests/usb-audio-test.sh audio-cadence 200 fs
+	$(GATE) tests/usb-audio-stream-test.sh
+	$(GATE) tests/usb-audio-stream16-test.sh
+	$(GATE) tests/usb-audio-durability-test.sh
+	USBAUDIO_FLAGS="$(USBAUDIO_FLAGS)" $(GATE) tests/usb-audio-guard-test.sh
 	@echo "ALL USB-AUDIO GATES PASSED"
+
+# out/sig8: the channel-signature fixture (README "Test fixture") — eight
+# distinct stereo tones, one per track, on one-shot trigs, on a 256 MB card.
+# Built like out/fx2, by a walk, and cached; delete the directory to rebuild.
+out/sig8/card.img out/sig8/nvram.bin: octemu $(QEMU) out/fx/card.img \
+                                      tests/build-sig-fixture.sh tests/gen-sig-samples.py \
+                                      scripts/card.py tests/walks/sig8-build.jsonl
+	@echo "== out/sig8: eight-tone signature walk, about 12 min =="
+	@tests/build-sig-fixture.sh
 
 # `make test` is the fast, deterministic set — about 25 seconds, and a clean
 # run means the Octatrack boots, both DSP cores run the real payload, the
@@ -385,13 +414,20 @@ $(USBMIDI).os: custom/usb-midi.py custom/coldfire/usb-midi.s $(RECEIVE).os
 # + iso IN endpoint added. The payload rides the CF card as /USBAUDIO.BIN and is
 # copied into SDRAM scratch at runtime, so ONE image carries RECEIVE+AMP,
 # USB-MIDI, and USB-audio.
+# ☠ Built with the SHIPPING flags, so every gate tests what a unit runs: the
+# payload reserves flex-heap pages at runtime (--heap-reserve) and its dTD +
+# packet buffer sit in cache-inhibited memory (--dma-at). The UAC2 payload
+# REQUIRES --dma-at (it refuses to assemble otherwise). Never ship a build
+# made with different flags. No --plain: the endpoint is asynchronous and the
+# rate servo is what keeps the ring from drifting (custom/usb-audio.py --help).
+USBAUDIO_FLAGS ?= --heap-reserve 9 --load-base 0x40a955e0 --dma-at 0x4ec94a00
 $(USBAUDIO).os: custom/usb-audio.py custom/coldfire/usb-audio.s \
                 custom/coldfire/usb-audio-tramp.s \
                 custom/coldfire/usb-audio-alloc.s \
                 custom/coldfire/usb-audio-report.s \
                 custom/coldfire/usb-audio-guard.s $(USBMIDI).os
 	$(ASM_PREFLIGHT)
-	python3 custom/usb-audio.py --in $(USBMIDI).os --out $@
+	python3 custom/usb-audio.py --in $(USBMIDI).os --out $@ $(USBAUDIO_FLAGS)
 
 # ------------------------------------------------------------------ hardware --
 # The fw-* targets above emit all three forms under one basename. BUILD is the

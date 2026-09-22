@@ -1,37 +1,41 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""usb-audio.py — the first copy-to-scratch feature: a UAC1 audio-streaming
-IN endpoint (the emulated MAIN output, 44.1 kHz stereo 16-bit) added to the
-usb-midi composite.
+"""usb-audio.py — a UAC2 audio-streaming IN endpoint added to the usb-midi
+composite: at high speed the eight tracks as sixteen channels (track N's L/R
+on channels 2N-1/2N, post-FX, pre-fader), at full speed their stereo sum, all
+44.1 kHz 16-bit.
 
 Unlike usb-midi (which revived dormant firmware), there is NO audio-streaming
 code in the OS, and the new code (four grown config descriptors + the EP3 iso
-servicing) is far larger than the ~408 B of image free space usb-midi leaves.
-So the payload lives on the CF card as /USBAUDIO.BIN, is copied at runtime into
-the canary-verified SDRAM scratch region (0x48001000), and runs there. The
-region was chosen by stamping guest memory and re-reading it (tests/canary.py),
-not by assumption.
+servicing + a 36 KB audio ring) is far larger than the ~408 B of image free
+space usb-midi leaves. So the payload lives on the CF card as /USBAUDIO.BIN
+and is loaded at runtime into flex-heap pages that stage2 takes out of the
+firmware's free list (--heap-reserve), where nothing else will ever be placed.
 
-Two pieces are assembled:
+Pieces assembled here:
 
-- custom/coldfire/usb-audio.s  (payload, linked at 0x48001000): stage2 runtime installer,
-  the SET/GET_INTERFACE + usb_isr + descriptor-clamp shims, the iso packet
-  builder, and the four grown UAC1 configs (this script generates them as an
-  assembly include). Written to the card as /USBAUDIO.BIN and to
-  out/USBAUDIO.BIN.
-- custom/coldfire/usb-audio-tramp.s  (trampoline, linked into the 408 B image slack after
-  usb-midi's overlay): hooks fs_card_detect_poll, and once the card is mounted
-  loads the payload into scratch, invalidates the I-cache, and jsr's stage2.
+- custom/coldfire/usb-audio.s (the payload, position-independent via a
+  relocation table): stage2 runtime installer, the SET/GET_INTERFACE + EP0
+  clock-request + usb_isr + descriptor-clamp shims, the per-block producer,
+  the iso packet builder, and the four grown UAC2 configs (generated below as
+  an assembly include). Written to the card as /USBAUDIO.BIN.
+- custom/coldfire/usb-audio-tramp.s (trampoline, linked into the 408 B image
+  slack after usb-midi's overlay): hooks fs_card_detect_poll, and once the
+  card is mounted loads the payload, invalidates the I-cache, and jsr's
+  stage2.
+- custom/coldfire/usb-audio-{alloc,report,guard}.s: the page allocator, the
+  on-screen status reporter, and the image-resident hook guard, each in its
+  own measured free zone.
 
-Only TWO in-image writes land here, both expect()-guarded: the trampoline blob
-in the free slack, and the 6-byte jmp into fs_card_detect_poll. Everything
-else the payload needs is installed AT RUNTIME by stage2 (into image code, but
-only after the card blob is confirmed loaded — so an image without the card
-file is exactly the stock usb-midi composite).
+Only a few in-image writes land here, all expect()-guarded: those blobs in
+their free zones and the 6-byte jmp into fs_card_detect_poll. Everything else
+the payload needs is installed AT RUNTIME by stage2 (into image code, but only
+after the card blob is confirmed loaded — so an image without the card file
+is exactly the stock usb-midi composite).
 
-Builds on out/usb-midi.bin by default -> out/usb-audio.bin.
-
-Usage: custom/usb-audio.py [--in out/usb-midi.bin] [--out out/usb-audio.bin]
+Usage (the Makefile passes the shipping flags, USBAUDIO_FLAGS):
+  custom/usb-audio.py --in IMAGE.os --out IMAGE.os [--payload out/USBAUDIO.BIN]
+                      --heap-reserve N --load-base ADDR --dma-at ADDR
 """
 import argparse
 import os
@@ -44,25 +48,9 @@ BASE = 0x40000400
 # ☠ HARDWARE-MEASURED, not canary-derived. 0x48001000 was wrong: on a real
 # unit, writes past ~0x48003000 destroy image code, and 0x48010000 is so badly
 # occupied that the corruption takes out the exception screen's own display.
-# 0x49000000 write-verified clean for 256 KB on hardware, by a standalone
-# two-pattern memtest payload. ☠ Re-measure before moving this again.
+# 0x49000000 write-verified clean for 256 KB on hardware
+# (cf/memtest-probe.s). ☠ Re-measure before moving this again.
 SCRATCH = 0x49000000                    # payload load address in SDRAM scratch
-# ☠ These three are facts, not choices. Every other value has been tried on a
-# unit and failed:
-#   LOAD_BASE  the bottom of the flex heap. Hand-picked SDRAM addresses
-#              (0x48001000, 0x49000000, 0x4a000000, 0x48140000) were each
-#              measured "free" and each turned out to be written during
-#              ordinary use, crashing the machine.
-#   HEAP_PAGES pages taken out of flex_heap_init's memset AND its free-page
-#              stack at runtime, so a project load cannot wipe the payload.
-#   DMA_AT     the dTD and iso packet buffer, in CACHE-INHIBITED memory. The
-#              payload runs from the heap, which ACR0 maps cacheable copyback,
-#              and the USB controller does not snoop the D-cache: structures
-#              left there are read as stale and the endpoint transmits nothing.
-LOAD_BASE  = 0x40a955e0
-HEAP_PAGES = 5
-DMA_AT     = 0x4ec94a00
-
 PAYLOAD_HDR = 28                        # self-describing header, see below
 # Header v2, all big-endian longwords:
 #   +0  magic 'OTPL'
@@ -76,8 +64,8 @@ PAYLOAD_HDR = 28                        # self-describing header, see below
 #       compute the fixup delta without a build-time constant of its own
 PAYLOAD_MAGIC = 0x4F54504C              # 'OTPL'
 PAYLOAD_MAX = 0x10000                   # largest card blob the trampoline loads
-# The image free slack after usb-midi's overlay (zone 0x400d24d0; usb-midi
-# occupies up to 0x400d2b44, leaving 408 B to 0x400d2cdc).
+# The image free slack after usb-midi's overlay (the free zone at 0x400d24d0;
+# usb-midi occupies up to 0x400d2b44, leaving 408 B to 0x400d2cdc).
 ZONE_TRAMP = 0x400D2B44
 ZONE_END = 0x400D2CDC
 ASM = os.path.join(ROOT, "custom/coldfire/usb-audio.s")
@@ -85,9 +73,9 @@ ASM = os.path.join(ROOT, "custom/coldfire/usb-audio.s")
 # ☠ TEST-ONLY. --omit-qh-clear rebuilds the payload WITHOUT clearing EP3's
 # device queue head — the defect that crashed a real unit twice by letting the
 # USB controller DMA through the garbage in its token and buffer pointers. It
-# exists so tests/usb-audio-qh-test.sh can prove the emulator's
-# UNINITIALIZED dQH detector actually fires: a detector that has never been
-# seen to fire proves nothing. NEVER ship a payload built with this.
+# exists so tests/usb-audio-qh-test.sh can prove the emulator's UNINITIALIZED
+# dQH detector actually fires: a detector that has never been seen to fire
+# proves nothing. NEVER ship a payload built with this.
 QH_CLEAR_SNIPPETS = (
     """    bsr     audio_qh_resolve        | %a0 = EP3 dQH, from the controller
     moveq   #15,%d1
@@ -113,12 +101,12 @@ ASM_TRAMP = os.path.join(ROOT, "custom/coldfire/usb-audio-tramp.s")
 # expect() guard caught when this was first placed there.
 ASM_GUARD = os.path.join(ROOT, "custom/coldfire/usb-audio-guard.s")
 # ☠ The on-screen reporter needs its own zone: the trampoline's has tens of
-# bytes left, not hundreds. 199 B free at 0x400c14d5.
+# bytes left, not hundreds. 199 B free at 0x400c14d5 (measured).
 ASM_REPORT = os.path.join(ROOT, "custom/coldfire/usb-audio-report.s")
 ZONE_REPORT = 0x400C14D5
 ZONE_REPORT_END = 0x400C159C
 # ☠ The page allocator needs its own zone too; the trampoline's has single
-# digits of slack. 150 B free at 0x400d3da2.
+# digits of slack. 150 B free at 0x400d3da2 (measured).
 ASM_ALLOC = os.path.join(ROOT, "custom/coldfire/usb-audio-alloc.s")
 ZONE_ALLOC = 0x400D3DA2
 ZONE_ALLOC_END = 0x400D3E38
@@ -130,15 +118,30 @@ FSCDP = 0x4003F174
 FSCDP_BYTES = "2f022239460d1cbc"
 
 SAMPLE_RATE = 44100
-ISO_MAXPKT = 45 * 4                      # 45 frames * 4 bytes = 180 (stereo s16)
+# ☠ THE SPEED DECIDES THE STREAM. High speed: sixteen channels (track 1 L/R on
+# channels 1/2 ... track 8 L/R on 15/16), 23 frames x 32 B = 736 B packets
+# polled every 500 us (bInterval 3). Full speed: the stereo sum, 45 x 4 =
+# 180 B every 1 ms — sixteen channels need 1411 B/ms and a full-speed iso
+# endpoint moves at most 1023. The two config descriptors differ only in
+# these numbers, never in length (the clamp shims carry ONE length).
+HS_CHANNELS, HS_MAXPKT, HS_BINTERVAL = 16, 23 * 32, 3
+FS_CHANNELS, FS_MAXPKT, FS_BINTERVAL = 2, 45 * 4, 1
+DMA_WINDOW = 0x4EC94A00                  # ..0x4EC95000: 2 dTDs + 2 x 736 B
+UAC2_AC_IFACE = 3                        # the audio function's AudioControl
+UAC2_AS_IFACE = 4                        # ... and its AudioStreaming
+UAC2_CLOCK_ID, UAC2_IT_ID, UAC2_OT_ID = 0x10, 0x11, 0x12
+DMA_WINDOW_LEN = 2 * 32 + 2 * HS_MAXPKT  # 1536: exactly the window
 
 
 def config_descriptor(hs, other_speed=False):
     """The usb-midi MSC+AC+MS composite (byte-identical to usb-midi.py) grown
-    with a fourth interface: UAC1 AudioStreaming (alt 0 zero-bandwidth + alt 1
-    with an iso IN EP), Format Type I PCM 44100/16/2. The AC header now links
-    both the MIDIStreaming (2) and AudioStreaming (3) interfaces."""
+    with a second audio function: a UAC2 AudioControl (clock source, input
+    terminal, USB-streaming output terminal) + AudioStreaming (alt 0
+    zero-bandwidth, alt 1 with the iso IN EP), Type I PCM 44100/16, sixteen
+    channels at high speed and the stereo sum at full speed."""
     bulk = 512 if hs else 64
+    nch = HS_CHANNELS if hs else FS_CHANNELS
+    maxpkt = HS_MAXPKT if hs else FS_MAXPKT
 
     def ep(addr, pkt):
         return bytes([7, 5, addr, 2]) + struct.pack("<H", pkt) + bytes([0])
@@ -151,55 +154,74 @@ def config_descriptor(hs, other_speed=False):
                 bytes([6, 0x24, 2, 2, 2, 0]) +
                 bytes([9, 0x24, 3, 1, 3, 1, 2, 1, 0]) +
                 bytes([9, 0x24, 3, 2, 4, 1, 1, 1, 0]))
-    # AudioStreaming interface 3: alt 0 (zero bandwidth) then alt 1 (iso EP).
+    # ---- the audio function: UAC2 --------------------------------------------
+    # ☠ WHY UAC2 AND NOT UAC1. UAC1 is a 1 ms protocol even at high speed:
+    # Apple's TN3190 says a high-speed UAC1 device MUST use bInterval 4 (1 ms)
+    # and is "limited to data transfer sizes of 1024 bytes per millisecond",
+    # and its driver does at most one transaction per microframe. Sixteen
+    # channels of 16-bit 44.1 kHz are 1411 B/ms, so UAC1 tops out at 11
+    # channels. UAC2 allows bInterval 3 (500 us), where a 23-frame packet is
+    # 736 B. Entity ids: clock 0x10, input terminal 0x11, output terminal 0x12
+    # (the MIDI function's jack ids live in a different function).
+    #
+    # The host learns the (only) sample rate through class requests to the
+    # clock source (RANGE + CUR of CS_SAM_FREQ_CONTROL, CUR of CLOCK_VALID),
+    # answered by the payload's EP0 shim (cf/usb-audio.s audio_ctrl_shim).
+    # ☠ The clock frequency control is READ-ONLY (bmControls 0b01): a
+    # host-programmable clock would oblige us to accept SET_CUR, a control
+    # OUT with a 4-byte data stage, and the stock EP0 stack has no OUT data
+    # stage at all.
+    CLK, IT, OT = UAC2_CLOCK_ID, UAC2_IT_ID, UAC2_OT_ID
+    clock = bytes([8, 0x24, 0x0A, CLK,
+                   0x01,            # bmAttributes: internal fixed clock
+                   0x05,            # bmControls: freq read-only, validity read-only
+                   0, 0])
+    in_term = (bytes([17, 0x24, 0x02, IT]) + struct.pack("<H", 0x0603) +
+               bytes([0, CLK, nch]) + struct.pack("<I", 0) +
+               bytes([0]) + struct.pack("<H", 0) + bytes([0]))
+    out_term = (bytes([12, 0x24, 0x03, OT]) + struct.pack("<H", 0x0101) +
+                bytes([0, IT, CLK]) + struct.pack("<H", 0) + bytes([0]))
+    ac_audio_total = 9 + len(clock) + len(in_term) + len(out_term)
+    ac_audio = (bytes([9, 0x24, 1]) + struct.pack("<H", 0x0200) +
+                bytes([0x0A]) +                          # bCategory PRO-AUDIO
+                struct.pack("<H", ac_audio_total) + bytes([0]) +
+                clock + in_term + out_term)
+    AC, AS = UAC2_AC_IFACE, UAC2_AS_IFACE
     as_iface = (
-        bytes([9, 4, 4, 0, 0, 1, 2, 0, 0]) +                # IF3 alt0 AS
-        bytes([9, 4, 4, 1, 1, 1, 2, 0, 0]) +                # IF3 alt1 AS
-        bytes([7, 0x24, 1, 2, 0]) + struct.pack("<H", 1) +  # AS_GENERAL, link OT2, PCM
-        bytes([11, 0x24, 2, 1, 2, 2, 16, 1]) +              # FORMAT_TYPE_I
-        struct.pack("<I", SAMPLE_RATE)[:3] +                # tSamFreq (3 B LE)
-        bytes([9, 5, 0x83, 0x05]) +                         # iso IN EP, async
-        struct.pack("<H", ISO_MAXPKT) +
-        # ☠ bInterval is SPEED-DEPENDENT for isochronous endpoints. At full
-        # speed it counts 1 ms frames, so 1 = one packet per millisecond. At
-        # high speed it is an exponent over 125 us MICROFRAMES: the interval
-        # is 2^(bInterval-1) microframes, so 1 would demand a packet every
-        # 125 us — eight times the rate 44.1 kHz stereo 16-bit needs, and a
-        # rate the producer cannot feed. 4 gives 2^3 = 8 microframes = 1 ms.
-        # ☠ The unit enumerates at 480 Mb/s, so the HIGH SPEED config is the
-        # one a host actually uses; the packet bench ignores bInterval
-        # entirely, which is why every gate passed with it wrong.
-        bytes([4 if hs else 1, 0, 0]) +
-
-        bytes([7, 0x25, 1, 0, 0]) + struct.pack("<H", 0))   # CS iso EP
+        bytes([9, 4, AS, 0, 0, 1, 2, 0x20, 0]) +            # IF4 alt0 AS (2.0)
+        bytes([9, 4, AS, 1, 1, 1, 2, 0x20, 0]) +            # IF4 alt1 AS (2.0)
+        bytes([16, 0x24, 1, OT, 0, 1]) +                    # AS_GENERAL: link OT,
+        struct.pack("<I", 1) +                              #   Type I, PCM
+        bytes([nch]) + struct.pack("<I", 0) + bytes([0]) +  #   channels, no map
+        bytes([6, 0x24, 2, 1, 2, 16]) +                     # FORMAT_TYPE_I 2.0: 16-bit in 2 B
+        bytes([7, 5, 0x83, 0x05]) +                         # iso IN EP, async, data
+        struct.pack("<H", maxpkt) +
+        # ☠ bInterval is SPEED-DEPENDENT for isochronous endpoints: 1 ms
+        # frames at full speed, 2^(bInterval-1) microframes of 125 us at high
+        # speed. 3 = every 500 us, the poll that lets 16 channels fit one
+        # 1024 B transaction. The unit enumerates at 480 Mb/s, so the HIGH
+        # SPEED config is the one a host actually uses; the packet bench
+        # ignores bInterval entirely.
+        bytes([HS_BINTERVAL if hs else FS_BINTERVAL]) +
+        bytes([8, 0x25, 1, 0, 0, 0]) + struct.pack("<H", 0))  # CS iso EP 2.0
     # ☠ TWO SEPARATE AUDIO FUNCTIONS, mirroring a device macOS accepts.
     #
     # A working Elektron Digitone on the same Mac presents AudioControl +
     # AudioStreaming as one function and a SECOND, independent AudioControl +
     # MIDIStreaming as another. Putting AudioStreaming and MIDIStreaming under
-    # ONE AudioControl collection is legal per UAC1 but macOS declines it
-    # silently: usbaudiod logs "USBDevice create" and then publishes nothing.
-    # Measured, not deduced — the Digitone is the reference.
+    # ONE AudioControl collection is legal but macOS declines it silently:
+    # usbaudiod logs "USBDevice create" and then publishes nothing. Measured,
+    # not deduced — the Digitone is the reference.
     #
     #   iface 0  MSC
-    #   IAD(1,2) iface 1 AudioControl [2] + iface 2 MIDIStreaming   <- unchanged
-    #   IAD(3,4) iface 3 AudioControl [4] + iface 4 AudioStreaming  <- audio
+    #   IAD(1,2) iface 1 AudioControl [2] + iface 2 MIDIStreaming   <- UAC1, unchanged
+    #   IAD(3,4) iface 3 AudioControl [4] + iface 4 AudioStreaming  <- UAC2 audio
     #
-    # Keeping MSC/AC/MS numbering means the usb-midi half is untouched; only
-    # the AudioStreaming interface moves, from 3 to 4.
-    in_term = bytes([12, 0x24, 0x02, 1]) + struct.pack("<H", 0x0603) + \
-              bytes([0, 2]) + struct.pack("<H", 0x0003) + bytes([0, 0])
-    out_term = bytes([9, 0x24, 0x03, 2]) + struct.pack("<H", 0x0101) + \
-               bytes([0, 1, 0])
+    # Keeping MSC/AC/MS numbering means the usb-midi half is untouched.
     # the MIDI function's AudioControl: header only, collecting interface 2
     ac_midi = bytes([9, 0x24, 1, 0, 1]) + struct.pack("<H", 9) + bytes([1, 2])
-    # the audio function's AudioControl: header + terminals, collecting 4
-    ac_audio_total = 9 + len(in_term) + len(out_term)
-    ac_audio = bytes([9, 0x24, 1, 0, 1]) + \
-               struct.pack("<H", ac_audio_total) + bytes([1, 4]) + \
-               in_term + out_term
     iad_midi = bytes([8, 0x0B, 1, 2, 0x01, 0x00, 0x00, 0])
-    iad_audio = bytes([8, 0x0B, 3, 2, 0x01, 0x00, 0x00, 0])
+    iad_audio = bytes([8, 0x0B, AC, 2, 0x01, 0x00, 0x20, 0])  # AF_VERSION_02_00
     body = (bytes([9, 4, 0, 0, 2, 8, 6, 0x50, 0]) +
             ep(0x81, bulk) + ep(0x01, bulk) +
             iad_midi +
@@ -209,7 +231,7 @@ def config_descriptor(hs, other_speed=False):
             ep_midi(0x02, bulk) + bytes([5, 0x25, 1, 1, 1]) +
             ep_midi(0x82, bulk) + bytes([5, 0x25, 1, 1, 3]) +
             iad_audio +
-            bytes([9, 4, 3, 0, 0, 1, 1, 0, 0]) + ac_audio +
+            bytes([9, 4, AC, 0, 0, 1, 1, 0x20, 0]) + ac_audio +  # IP_VERSION_02_00
             as_iface)
     total = 9 + len(body)
     dt = 7 if other_speed else 2
@@ -218,19 +240,26 @@ def config_descriptor(hs, other_speed=False):
 
 
 def emit_cfg_include(path):
-    """Write an assembly include placing the four configs, each 256-aligned so
-    none crosses a 4 KB page (the EP0 responder sends from buffer page 0 only —
-    0x4001d498), with symbols the payload links against."""
+    """Write an assembly include placing the four configs, with symbols the
+    payload links against.
+
+    ☠ No page alignment is attempted, because none can be promised: the blob
+    is linked at one address and relocated to whatever page the loader picks,
+    which destroys any alignment beyond the relocation delta's. A config that
+    straddles a 4 KB page used to transmit truncated, because the stock EP0
+    sender fills only the dTD's buffer page 0; the payload's audio_ep0page_shim
+    fills page 1 too, and THAT is the guarantee. An earlier 512-byte .balign
+    here looked like one and was not."""
     fs = config_descriptor(False)
     hs = config_descriptor(True)
     os_fs = config_descriptor(False, other_speed=True)
     os_hs = config_descriptor(True, other_speed=True)
     assert len(fs) == len(hs) == len(os_fs) == len(os_hs), "configs must match"
     lines = ["| generated by custom/usb-audio.py — do not edit",
-             "    .balign 4096", "    .global usbaudio_configs", "usbaudio_configs:"]
+             "    .balign 4", "    .global usbaudio_configs", "usbaudio_configs:"]
     for name, blob in [("cfg_fs", fs), ("cfg_hs", hs),
                        ("cfg_os_fs", os_fs), ("cfg_os_hs", os_hs)]:
-        lines.append("    .balign 256")
+        lines.append("    .balign 4")
         lines.append("    .global %s" % name)
         lines.append("%s:" % name)
         lines.append("    .byte " + ",".join("0x%02x" % b for b in blob))
@@ -335,15 +364,49 @@ def read_sym(path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--in", dest="inp", required=True)
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--in", dest="inp",
+                    default=os.path.join(ROOT, "out/usb-midi.bin"))
+    ap.add_argument("--out", default=os.path.join(ROOT, "out/usb-audio.bin"))
     ap.add_argument("--payload",
                     default=os.path.join(ROOT, "out/USBAUDIO.BIN"))
+    ap.add_argument("--plain", action="store_true",
+                   help="A/B ONLY: no rate servo. The endpoint is asynchronous, "
+                        "so the servo (send what is produced, steering the ring "
+                        "fill) is what keeps the ring from drifting into an "
+                        "under/overrun as the device and host clocks diverge. "
+                        "An earlier hardware click count that favoured --plain "
+                        "(47 vs 89 discontinuities in 30 s) was taken on the "
+                        "single-dTD stereo build, where prime latency made the "
+                        "holes; re-measure on the two-dTD queue before trusting "
+                        "it.")
     ap.add_argument("--no-guard", action="store_true",
                    help="TEST ONLY: omit the image-resident hook guard, so a "
                         "destroyed payload crashes as it did before the guard "
                         "existed. This is the negative control for "
                         "tests/usb-audio-guard-test.sh.")
+    ap.add_argument("--heap-reserve", type=int, default=0,
+                   help="take this many flex-heap pages out of the free "
+                        "list and the memset at RUNTIME, so a payload loaded "
+                        "at the heap base survives flex_heap_init. Requires "
+                        "--load-base 0x40a955e0.")
+    ap.add_argument("--dma-at", type=lambda x: int(x, 0), default=DMA_WINDOW,
+                   help="the cache-inhibited window for the two dTDs and two "
+                        "packet buffers (1536 B). Default: the verified "
+                        "0x4ec94a00..0x4ec95000 in the firmware's USB arena.")
+    ap.add_argument("--load-base", type=lambda x: int(x, 0), default=0,
+                    help="TEST ONLY: load the payload at this fixed address "
+                         "instead of asking the heap allocator. For probing "
+                         "whether a candidate region survives a project load.")
+    ap.add_argument("--source", choices=("tracks", "sine", "probe", "probe2", "probe3", "place", "telem"),
+                   default="tracks",
+                   help="audio source: the summed track bus (default) or a "
+                        "synthetic 441 Hz triangle that ignores readback_buf, "
+                        "to separate the tap point from the USB path")
+    ap.add_argument("--patches", choices=("all", "usb", "frame", "none"),
+                    default="all",
+                    help="which image hooks stage2 installs. Subsets exist to "
+                         "bisect a hardware fault by swapping ONE CARD FILE "
+                         "instead of reflashing.")
     ap.add_argument("--omit-qh-clear", action="store_true",
                     help="TEST ONLY: build the payload WITHOUT clearing EP3's "
                          "device queue head, reproducing the defect that "
@@ -363,6 +426,11 @@ def main():
                      % (what, va, got.hex(), want.hex()))
 
     tmp = "/tmp"
+    if a.dma_at & 31:
+        sys.exit("--dma-at must be 32-byte aligned (dTDs)")
+    if a.dma_at + DMA_WINDOW_LEN > 0x4EC95000 and a.dma_at < 0x4EC95000:
+        sys.exit("--dma-at window %#x..%#x runs into the firmware's dTD pool "
+                 "at 0x4ec95000" % (a.dma_at, a.dma_at + DMA_WINDOW_LEN))
     # ☠ The reporter is built FIRST: both the trampoline and stage2 call it.
     # stage2 must report its OWN outcome — it can abort on an expect-mismatch
     # and return normally, which the trampoline cannot distinguish from a
@@ -375,9 +443,9 @@ def main():
                  % (len(report), ZONE_REPORT_END - ZONE_REPORT))
     cfg_len = emit_cfg_include(os.path.join(tmp, "usb-audio-cfg.s"))
 
-    # 1. payload -> scratch (0x48001000). Chains into usb-midi's isr shim; the
-    # config-clamp shim needs the grown length; the pea-repoint expect() bytes
-    # are the usb-midi config addresses the responder currently holds.
+    # 1. the payload. Chains into usb-midi's isr shim; the config-clamp shim
+    # needs the grown length; the pea-repoint expect() bytes are the usb-midi
+    # config addresses the responder currently holds.
     # The readback arena carries 32-bit samples; this is the right-shift that
     # lands them in int16. CALIBRATED against --recording by
     # tests/usb-audio-stream-test.sh, not assumed.
@@ -404,9 +472,11 @@ def main():
                              os.path.join(tmp, "usbaguard-pre.bin"),
                              {"PAYLOAD_BASE": 0x40000000},
                              tmp)
-    guard_frame = _gsyms["usbaudio_guard_frame"] if (LOAD_BASE and not a.no_guard) else 0
+    guard_frame = _gsyms["usbaudio_guard_frame"] if (a.load_base and not a.no_guard) else 0
     guard_shim = _gsyms["usbaudio_guard_shim"] if guard_frame else 0
     defs = {"AUDIO_SHIFT": AUDIO_SHIFT,
+            "UAC2_AC_IFACE": UAC2_AC_IFACE, "UAC2_AS_IFACE": UAC2_AS_IFACE,
+            "UAC2_CLOCK_ID": UAC2_CLOCK_ID,
             "UA_TRAMP_DONE": _tsyms["usbaudio_tramp_done"],
             "UA_REPORT": rsyms["usbaudio_report"],
             "USBMIDI_ISR_SHIM": midi["usbmidi_isr_shim"], "CFG_LEN": cfg_len,
@@ -427,13 +497,15 @@ def main():
         open(asm, "w").write(src)
         print("  ☠ TEST BUILD: EP3 queue head is NOT cleared")
     asmsyms = {"GUARD_FRAME": guard_frame,
+               "AUD_SERVO": 0 if a.plain else 1,
                "GUARD_SHIM": guard_shim,
-               "EXPECT_BASE": 1 if LOAD_BASE else 0,
-               "EXPECT_STAGE2": (LOAD_BASE + PAYLOAD_HDR) if LOAD_BASE else 0,
-               "PATCH_USB": 1,
-               "PATCH_FRAME": 1,
-               "DMA_FIXED": DMA_AT,
-               "HEAP_RESERVE": HEAP_PAGES}
+               "EXPECT_BASE": 1 if a.load_base else 0,
+               "EXPECT_STAGE2": (a.load_base + PAYLOAD_HDR) if a.load_base else 0,
+               "PATCH_USB": 0 if a.patches in ("none", "frame") else 1,
+               "PATCH_FRAME": 0 if a.patches in ("none", "usb") else 1,
+               "DMA_FIXED": a.dma_at,
+               "HEAP_RESERVE": a.heap_reserve,
+               "AUD_SOURCE": {"tracks": 0, "sine": 1, "probe": 2, "probe2": 3, "probe3": 4, "place": 5, "telem": 6}[a.source]}
     payload, psyms = assemble(asm, SCRATCH + PAYLOAD_HDR,
                               os.path.join(tmp, "usbaudio.bin"), defs, tmp,
                               asmsyms=asmsyms)
@@ -475,22 +547,26 @@ def main():
     # ☠ Max sectors per fs_read call. ONE.
     #
     # The only transfer size ever PROVEN to land at the requested address is a
-    # single sector: a 132-byte (one-sector) probe payload validated and
-    # executed from 0x48001000 on hardware. 8 sectors was briefly set here on
-    # the strength of a 4 KB probe "booting fine" — but that probe was built to be
+    # single sector: cf/alias-probe.s (132 B, 1 sector) validated and executed
+    # from 0x48001000 on hardware. 8 sectors was briefly set here on the
+    # strength of a 4 KB probe "booting fine" — but that probe was built to be
     # REJECTED on its length check, so booting proved only that the misplaced
     # write missed anything fatal, NOT that the data arrived. It did not: an
     # 8-sector-chunked load still overwrote the OS image and crashed the unit.
     #
-    # ☠ Do not raise this without a probe that LANDS AND EXECUTES at that
-    # size. "The machine booted" is not evidence that a read went where it was
-    # asked to.
+    # ☠ Do not raise this without a probe that LANDS AND EXECUTES at that size.
+    # "The machine booted" is not evidence that a read went where it was asked
+    # to.
     READ_CHUNK = 1
     tdefs = {"PAYLOAD_BASE": SCRATCH, "PAYLOAD_MAGIC": PAYLOAD_MAGIC,
              "PAYLOAD_MAX": PAYLOAD_MAX, "READ_CHUNK": READ_CHUNK}
 
     # The allocator must ask for enough pages to hold the whole blob.
     npages = (len(payload) + PAGE_SZ - 1) // PAGE_SZ
+    if a.heap_reserve and a.heap_reserve < npages:
+        sys.exit("--heap-reserve %d pages holds %d B; the payload is %d B "
+                 "(%d pages)" % (a.heap_reserve, a.heap_reserve * PAGE_SZ,
+                                 len(payload), npages))
     alloc, asyms = assemble(ASM_ALLOC, ZONE_ALLOC,
                             os.path.join(tmp, "usbaalloc.bin"), {}, tmp,
                             asmsyms={"NPAGES": npages})
@@ -501,31 +577,31 @@ def main():
           % (len(alloc), ZONE_ALLOC, ZONE_ALLOC_END - ZONE_ALLOC - len(alloc),
              npages, npages * PAGE_SZ))
     tdefs["UA_ALLOC"] = asyms["usbaudio_alloc"]
-    tdefs["UA_FIXED_BASE"] = LOAD_BASE
-    if LOAD_BASE:
-        print("  load base %#x (heap bottom, reserved from flex_heap_init)"
-              % LOAD_BASE)
+    tdefs["UA_FIXED_BASE"] = a.load_base
+    if a.load_base:
+        print("  ☠ TEST BUILD: fixed load base %#x (not the allocator)"
+              % a.load_base)
     tdefs["UA_REPORT"] = rsyms["usbaudio_report"]
-    if LOAD_BASE and not a.no_guard:
+    if a.load_base and not a.no_guard:
         # runtime address of a payload symbol = link address + (load base - link base)
-        shim_rt = psyms["audio_frame_shim"] - SCRATCH + LOAD_BASE
+        shim_rt = psyms["audio_frame_shim"] - SCRATCH + a.load_base
         guard, gsyms = assemble(ASM_GUARD, ZONE_GUARD,
                                 os.path.join(tmp, "usbaguard.bin"),
-                                {"PAYLOAD_BASE": LOAD_BASE}, tmp)
+                                {"PAYLOAD_BASE": a.load_base}, tmp)
         if ZONE_GUARD + len(guard) > ZONE_GUARD_END:
             sys.exit("guard is %d bytes, zone is %d"
                      % (len(guard), ZONE_GUARD_END - ZONE_GUARD))
         print("  hook guard %d B at %#x (slack %d), payload base %#x "
               "(shim address published at run time)"
               % (len(guard), ZONE_GUARD, ZONE_GUARD_END - ZONE_GUARD - len(guard),
-                 LOAD_BASE))
+                 a.load_base))
         tdefs["UA_GUARD_POLL"] = gsyms["usbaudio_guard_poll"]
     else:
         guard, gsyms = b"", {}
         tdefs["UA_GUARD_POLL"] = 0
     tramp, _ = assemble(ASM_TRAMP, ZONE_TRAMP, os.path.join(tmp, "usbatramp.bin"),
                         tdefs, tmp,
-                        asmsyms={"UA_FIXED_BASE": LOAD_BASE,
+                        asmsyms={"UA_FIXED_BASE": a.load_base,
                                  "HAVE_GUARD": 1 if guard else 0})
     if ZONE_TRAMP + len(tramp) > ZONE_END:
         sys.exit("trampoline is %d bytes, slack is %d"

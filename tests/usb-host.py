@@ -16,6 +16,10 @@ that stalled. Exit 0 only when the whole scenario passed.
 import socket, struct, sys, time
 
 
+class Stall(Exception):
+    """The device answered a control-stage IN/OUT with a STALL handshake."""
+
+
 class Bench:
     def __init__(self, path, timeout=20.0):
         self.s = socket.create_connection if False else None
@@ -67,11 +71,16 @@ class Bench:
     def ep_in(self, ep, maxlen, timeout=None):
         r = self.cmd(f"in {ep} {maxlen}", f"in {ep}", timeout)
         parts = r.split()
+        if len(parts) > 2 and parts[2] == "stall":
+            raise Stall(f"EP{ep} IN stalled")
         return bytes.fromhex(parts[2]) if len(parts) > 2 else b""
 
     def ep_out(self, ep, data=b"", timeout=None):
         r = self.cmd(f"out {ep} {data.hex()}".rstrip(), f"out {ep}", timeout)
-        return int(r.split()[2])
+        parts = r.split()
+        if len(parts) > 2 and parts[2] == "stall":
+            raise Stall(f"EP{ep} OUT stalled")
+        return int(parts[2])
 
     # ---- control transfers ----
     def ctrl_in(self, bm, breq, wval, widx, wlen):
@@ -337,14 +346,15 @@ def validate_descriptors(b, hs=True):
 
 
 def validate_audio(b, hs=True):
-    # hs must match the speed the device is enumerated at: iso bInterval is
-    # interpreted per speed, so checking it against the wrong rule is worse
-    # than not checking it.
-    """Structural check of the UAC1 AudioStreaming addition on top of the
-    usb-midi composite: interface 3 (alt 0 zero-bandwidth + alt 1 with the iso
-    IN EP), Format Type I PCM 44100/16/2, the iso EP + its class-specific
-    descriptor, and the AC header linking both MS (2) and AS (3). The MSC +
-    MIDI half must still be present in the grown config."""
+    """Structural check of the UAC2 audio function added to the usb-midi
+    composite: its own IAD (protocol AF 2.0), an AudioControl 2.0 interface
+    (header bcdADC 2.00, a Clock Source with a READ-ONLY frequency control,
+    an Input Terminal and a USB-streaming Output Terminal wired to it), and an
+    AudioStreaming 2.0 interface (alt 0 zero-bandwidth, alt 1 with the iso IN
+    EP), Type I PCM 16-bit, 16 channels / 736 B / 500 us at high speed and
+    2 channels / 180 B / 1 ms at full speed. The MSC + MIDI half must still be
+    present. hs must match the speed the device was enumerated at: iso
+    bInterval and the channel count both depend on it."""
     _, cfg = enumerate_device(b, hs)
     errs = []
     descs = list(parse_config(cfg))
@@ -360,22 +370,23 @@ def validate_audio(b, hs=True):
                     f"interface descriptors {distinct}")
     # Interface Association Descriptors. macOS (usbaudiod) walks these to
     # decide what functions exist; with a single IAD spanning AC+MS+AS it
-    # logged AUAErrorCode.noAudioFunctions -- "an Audio Control but no Audio
-    # Functions (probably MIDI)" -- and refused the device. The fix is two
-    # separate audio functions, one MIDI, one streaming, as the Digitone does.
+    # logged AUAErrorCode.noAudioFunctions and refused the device. Two
+    # separate audio functions, one MIDI (1.0), one streaming (2.0).
     iads = [d for t, d in descs if t == 0x0b]
     if len(iads) != 2:
         errs.append(f"{len(iads)} IADs, want 2 (MIDI function + audio function)")
     else:
-        for iad, want_first, what in ((iads[0], 1, "MIDI"), (iads[1], 3, "audio")):
-            # bFirstInterface, bInterfaceCount, bFunctionClass
+        for iad, want_first, proto, what in ((iads[0], 1, 0x00, "MIDI"),
+                                             (iads[1], 3, 0x20, "audio")):
             if iad[2] != want_first or iad[3] != 2:
                 errs.append(f"{what} IAD covers iface {iad[2]}+{iad[3]}, "
                             f"want {want_first}+2")
-            if iad[4] != 0x01:
-                errs.append(f"{what} IAD bFunctionClass {iad[4]:#04x} != 0x01")
-        if iads[0][2] == iads[1][2]:
-            errs.append("both IADs start at the same interface")
+            if iad[4] != 0x01 or iad[5] != 0x00:
+                errs.append(f"{what} IAD class/subclass {iad[4]:#04x}/"
+                            f"{iad[5]:#04x} != 0x01/0x00")
+            if iad[6] != proto:
+                errs.append(f"{what} IAD bFunctionProtocol {iad[6]:#04x} != "
+                            f"{proto:#04x}")
     byclass = {(d[5], d[6]) for d in ifaces}
     for cs, what in [((8, 6), "MSC"), ((1, 1), "AudioControl"),
                      ((1, 3), "MIDIStreaming")]:
@@ -384,36 +395,45 @@ def validate_audio(b, hs=True):
     for addr in (0x81, 0x01, 0x02, 0x82):
         if addr not in {d[2] for t, d in descs if t == 5}:
             errs.append(f"MSC/MIDI endpoint {addr:#x} missing")
-    # ☠ Locate the AudioStreaming interface by CLASS, not by number. The
-    # descriptors were renumbered when they split into two audio functions
-    # (macOS rejects one AudioControl collecting both AudioStreaming and
-    # MIDIStreaming: AUAErrorCode.noAudioFunctions), and a gate that hardcodes
-    # "interface 3" then fails for entirely the wrong reason.
+    # ☠ Locate the interfaces by CLASS/PROTOCOL, never by number.
     as_num = next((d[2] for d in ifaces if d[5] == 1 and d[6] == 2), None)
+    ac_num = next((d[2] for d in ifaces
+                   if d[5] == 1 and d[6] == 1 and d[7] == 0x20), None)
     if as_num is None:
         errs.append("no AudioStreaming interface (class 1 subclass 2)")
         as_num = -1
+    if ac_num is None:
+        errs.append("no AudioControl 2.0 interface (class 1/1, protocol 0x20)")
+        ac_num = -1
     as_alts = [d for d in ifaces if d[2] == as_num]
     if len(as_alts) != 2:
         errs.append(f"interface {as_num} has {len(as_alts)} alt settings (want 2)")
     for d in as_alts:
-        if (d[5], d[6]) != (1, 2):
-            errs.append(f"iface3 alt{d[3]} class {d[5]:02x}/{d[6]:02x} "
-                        f"!= 01/02 (AUDIO/AUDIOSTREAMING)")
+        if d[7] != 0x20:
+            errs.append(f"iface{as_num} alt{d[3]} bInterfaceProtocol "
+                        f"{d[7]:#04x} != 0x20 (IP 2.0)")
     alt0 = [d for d in as_alts if d[3] == 0]
     alt1 = [d for d in as_alts if d[3] == 1]
     if not alt0 or alt0[0][4] != 0:
         errs.append(f"iface{as_num} alt0 is not zero-bandwidth")
     if not alt1 or alt1[0][4] != 1:
         errs.append(f"iface{as_num} alt1 does not have exactly 1 endpoint")
-    # Walk descriptors tracking the current interface so the class-specific
-    # 0x24/0x25 descriptors are attributed correctly (AS_GENERAL and the MS
-    # header share type 0x24 subtype 1).
+    # class-specific descriptors, attributed to their interface
     cur = None
+    ac_hdr = clock = in_term = out_term = None
     as_general = fmt = iso_ep = cs_ep = None
     for t, d in descs:
         if t == 4:
             cur = d[2]
+        elif cur == ac_num and t == 0x24:
+            if d[2] == 1:
+                ac_hdr = d
+            elif d[2] == 0x0A:
+                clock = d
+            elif d[2] == 2:
+                in_term = d
+            elif d[2] == 3:
+                out_term = d
         elif cur == as_num and t == 0x24 and d[2] == 1:
             as_general = d
         elif cur == as_num and t == 0x24 and d[2] == 2:
@@ -422,92 +442,175 @@ def validate_audio(b, hs=True):
             iso_ep = d
         elif cur == as_num and t == 0x25:
             cs_ep = d
-    # ☠ The AudioControl interface must DESCRIBE the audio, not merely group
-    # the streaming interfaces. A host builds its audio device from this
-    # terminal topology; with only an AC header it enumerates the interface
-    # and then declines to create a device — which is what macOS did while
-    # every check below passed, because they only looked at iface 3.
-    ac_hdr = in_term = out_term = None
-    cur = None
-    for t, d in descs:
-        if t == 4:
-            cur = d[2]
-        elif t == 0x24 and cur is not None and cur != as_num:
-            if d[2] == 1:
-                ac_hdr = d
-            elif d[2] == 2:
-                in_term = d
-            elif d[2] == 3:
-                out_term = d
+    nch = 16 if hs else 2
+    if not ac_hdr:
+        errs.append("AudioControl 2.0 has no HEADER")
+    else:
+        if len(ac_hdr) != 9 or (ac_hdr[3] | ac_hdr[4] << 8) != 0x0200:
+            errs.append(f"AC header is not bcdADC 2.00 ({ac_hdr.hex()})")
+        want = 9 + sum(len(x) for x in (clock, in_term, out_term) if x)
+        got = ac_hdr[6] | ac_hdr[7] << 8
+        if got != want:
+            errs.append(f"AC header wTotalLength {got} != {want}")
+    if not clock:
+        errs.append("AudioControl has no CLOCK_SOURCE — a UAC2 host cannot "
+                    "resolve the stream's clock")
+    else:
+        if len(clock) != 8:
+            errs.append(f"CLOCK_SOURCE length {len(clock)} != 8")
+        if clock[4] & 3 != 1:
+            errs.append(f"CLOCK_SOURCE bmAttributes {clock[4]:#04x}: not an "
+                        f"internal fixed clock")
+        # ☠ frequency control READ-ONLY (0b01): a host-programmable clock
+        # would oblige the device to accept SET_CUR, a control OUT with a
+        # data stage the stock EP0 stack does not have.
+        if clock[5] & 3 != 1:
+            errs.append(f"CLOCK_SOURCE bmControls {clock[5]:#04x}: frequency "
+                        f"control is not read-only")
     if not in_term:
-        errs.append("AudioControl has no INPUT_TERMINAL — a host cannot build "
-                    "an audio device from a header alone")
+        errs.append("AudioControl has no INPUT_TERMINAL")
+    elif len(in_term) != 17:
+        errs.append(f"INPUT_TERMINAL length {len(in_term)} != 17 (2.0 layout)")
+    else:
+        if clock and in_term[7] != clock[3]:
+            errs.append(f"INPUT_TERMINAL bCSourceID {in_term[7]} != clock "
+                        f"id {clock[3]}")
+        if in_term[8] != nch:
+            errs.append(f"INPUT_TERMINAL bNrChannels {in_term[8]} != {nch}")
     if not out_term:
         errs.append("AudioControl has no OUTPUT_TERMINAL")
-    if in_term and out_term:
+    elif len(out_term) != 12:
+        errs.append(f"OUTPUT_TERMINAL length {len(out_term)} != 12 (2.0 layout)")
+    else:
         if (out_term[4] | out_term[5] << 8) != 0x0101:
             errs.append("OUTPUT_TERMINAL is not USB Streaming (0x0101)")
-        if out_term[7] != in_term[3]:
+        if in_term and out_term[7] != in_term[3]:
             errs.append(f"OUTPUT_TERMINAL bSourceID {out_term[7]} does not "
                         f"name the INPUT_TERMINAL (id {in_term[3]})")
-    if ac_hdr and in_term and out_term:
-        want = len(ac_hdr) + len(in_term) + len(out_term)
-        got = ac_hdr[5] | ac_hdr[6] << 8
-        if got != want:
-            errs.append(f"AC header wTotalLength {got} != {want} (header + "
-                        f"terminals)")
-    if as_general and out_term and as_general[3] != out_term[3]:
-        errs.append(f"AS_GENERAL bTerminalLink {as_general[3]} does not name "
-                    f"the OUTPUT_TERMINAL (id {out_term[3]})")
+        if clock and out_term[8] != clock[3]:
+            errs.append(f"OUTPUT_TERMINAL bCSourceID {out_term[8]} != clock "
+                        f"id {clock[3]}")
     if not as_general:
         errs.append(f"no AS_GENERAL under AudioStreaming interface {as_num}")
-    elif (as_general[5] | as_general[6] << 8) != 1:
-        errs.append(f"AS_GENERAL wFormatTag {as_general[5]|as_general[6]<<8} "
-                    f"!= 1 (PCM)")
-    # ☠ bInterval on an ISO endpoint means different things per speed: 1 ms
-    # frames at full speed, but an exponent over 125 us microframes at high
-    # speed (interval = 2^(bInterval-1)). The bench ignores it entirely, so a
-    # value that demands 8x the real sample rate passes every transfer test
-    # here and then yields no usable device on a real host.
-    if iso_ep:
-        want = 4 if hs else 1
-        if iso_ep[6] != want:
-            errs.append(f"iso EP bInterval {iso_ep[6]} != {want} for "
-                        f"{'high' if hs else 'full'} speed — that is "
-                        f"{'125 us' if iso_ep[6] == 1 else 'wrong'} pacing, "
-                        f"not the 1 ms 44.1 kHz needs")
+    elif len(as_general) != 16:
+        errs.append(f"AS_GENERAL length {len(as_general)} != 16 (2.0 layout)")
+    else:
+        if out_term and as_general[3] != out_term[3]:
+            errs.append(f"AS_GENERAL bTerminalLink {as_general[3]} does not "
+                        f"name the OUTPUT_TERMINAL (id {out_term[3]})")
+        if as_general[5] != 1 or not (as_general[6] & 1):
+            errs.append("AS_GENERAL is not Format Type I / PCM")
+        if as_general[10] != nch:
+            errs.append(f"AS_GENERAL bNrChannels {as_general[10]} != {nch}")
     if not fmt:
-        errs.append(f"no FORMAT_TYPE_I under AudioStreaming interface {as_num}")
-    else:
-        if fmt[3] != 1:
-            errs.append(f"format type {fmt[3]} != I")
-        if (fmt[4], fmt[5], fmt[6]) != (2, 2, 16):
-            errs.append(f"format nCh/subframe/bits {fmt[4]}/{fmt[5]}/{fmt[6]} "
-                        f"!= 2/2/16")
-        freq = fmt[8] | fmt[9] << 8 | fmt[10] << 16
-        if freq != 44100:
-            errs.append(f"tSamFreq {freq} != 44100")
+        errs.append(f"no FORMAT_TYPE under AudioStreaming interface {as_num}")
+    elif len(fmt) != 6 or fmt[3] != 1 or fmt[4] != 2 or fmt[5] != 16:
+        errs.append(f"FORMAT_TYPE_I 2.0 {fmt.hex()} != type I, 2-byte "
+                    f"subslot, 16 bits")
+    want_pkt, want_int = (736, 3) if hs else (180, 1)
     if not iso_ep:
-        errs.append("no iso endpoint under iface3")
+        errs.append(f"no iso endpoint under iface{as_num}")
     else:
+        if len(iso_ep) != 7:
+            errs.append(f"iso EP descriptor length {len(iso_ep)} != 7")
         if iso_ep[2] != 0x83:
             errs.append(f"iso EP address {iso_ep[2]:#x} != 0x83")
         if iso_ep[3] & 3 != 1:
             errs.append(f"iso EP type {iso_ep[3] & 3} != 1 (isochronous)")
+        if (iso_ep[3] >> 2) & 3 != 1:
+            errs.append(f"iso EP sync type {(iso_ep[3] >> 2) & 3} != 1 "
+                        f"(asynchronous)")
         mx = iso_ep[4] | iso_ep[5] << 8
-        if mx != 180:
-            errs.append(f"iso EP wMaxPacketSize {mx} != 180")
+        if mx != want_pkt:
+            errs.append(f"iso EP wMaxPacketSize {mx} != {want_pkt}")
+        # ☠ bInterval on an ISO endpoint means different things per speed:
+        # 1 ms frames at full speed, an exponent over 125 us microframes at
+        # high speed. 3 = 500 us, the poll that lets 16 channels fit one
+        # 1024 B transaction; the bench ignores it, real hosts do not.
+        if iso_ep[6] != want_int:
+            errs.append(f"iso EP bInterval {iso_ep[6]} != {want_int} for "
+                        f"{'high' if hs else 'full'} speed")
+        if mx > (1024 if hs else 1023):
+            errs.append(f"iso EP wMaxPacketSize {mx} exceeds one transaction")
     if not cs_ep:
-        errs.append("no CS_ENDPOINT (audio iso EP) descriptor under iface3")
+        errs.append(f"no CS_ENDPOINT (audio iso EP) descriptor under iface{as_num}")
+    elif len(cs_ep) != 8:
+        errs.append(f"CS_ENDPOINT length {len(cs_ep)} != 8 (2.0 layout)")
     if errs:
         print("AUDIO DESCRIPTOR VALIDATION FAILED:")
         for e in errs:
             print("  ✗", e)
         return False
     print(f"audio descriptors valid: config {len(cfg)}B, {cfg[4]} interfaces, "
-          f"{len(iads)} IADs, iface{as_num} AudioStreaming alt0/alt1, "
-          f"Format Type I 44100/16/2, iso EP 0x83 180B")
+          f"{len(iads)} IADs, UAC2 iface{ac_num} AC (clock {clock[3]:#x}, "
+          f"IT {in_term[3]:#x}, OT {out_term[3]:#x}) + iface{as_num} AS "
+          f"alt0/alt1, Type I 16-bit {nch} ch, iso EP 0x83 {want_pkt}B "
+          f"bInterval {want_int}")
     return True
+
+
+def uac2_clock_requests(b, hs=True):
+    """The class requests a UAC2 host issues to the clock source before it
+    publishes a device, and one it must NOT get an answer to:
+
+      GET RANGE CS_SAM_FREQ_CONTROL -> 1 subrange, 44100..44100 step 0
+      GET CUR   CS_SAM_FREQ_CONTROL -> 44100
+      GET CUR   CS_CLOCK_VALID      -> 1
+      GET CUR   of an unsupported selector -> STALL (the stock handler)
+      GET_MAX_LUN on interface 0    -> still answered (the shim only
+                                        intercepts the audio AC interface)
+
+    ☠ Without the bench's EP0 STALL model the last two would be a hang and a
+    pass-by-timeout; with it a stall is an answer that can be asserted."""
+    _, cfg = enumerate_device(b, hs)
+    ifaces = [d for t, d in parse_config(cfg) if t == 4]
+    ac_num = next(d[2] for d in ifaces if d[5] == 1 and d[6] == 1 and d[7] == 0x20)
+    cur = None
+    clk = None
+    for t, d in parse_config(cfg):
+        if t == 4:
+            cur = d[2]
+        elif cur == ac_num and t == 0x24 and d[2] == 0x0A:
+            clk = d[3]
+    widx = (clk << 8) | ac_num
+    ok = True
+
+    def expect(what, got, want):
+        nonlocal ok
+        if got == want:
+            print(f"  ok: {what} -> {got.hex()}")
+        else:
+            print(f"  ✗ {what} -> {got.hex()!r}, want {want.hex()}")
+            ok = False
+
+    expect("RANGE sample frequency",
+           b.ctrl_in(0xA1, 2, 1 << 8, widx, 14),
+           struct.pack("<H", 1) + struct.pack("<III", 44100, 44100, 0))
+    expect("CUR sample frequency",
+           b.ctrl_in(0xA1, 1, 1 << 8, widx, 4), struct.pack("<I", 44100))
+    expect("CUR clock valid", b.ctrl_in(0xA1, 1, 2 << 8, widx, 1), b"\x01")
+    # a short wLength must be honoured (min(wLength, len))
+    expect("CUR sample frequency, wLength 2",
+           b.ctrl_in(0xA1, 1, 1 << 8, widx, 2), struct.pack("<H", 44100))
+    try:
+        got = b.ctrl_in(0xA1, 1, 7 << 8, widx, 4)
+        print(f"  ✗ unsupported selector answered {got.hex()} instead of STALL")
+        ok = False
+    except Stall:
+        print("  ok: unsupported clock selector -> STALL")
+    try:
+        got = b.ctrl_in(0xA1, 2, 1 << 8, (0x7f << 8) | ac_num, 14)
+        print(f"  ✗ unknown entity answered {got.hex()} instead of STALL")
+        ok = False
+    except Stall:
+        print("  ok: unknown entity -> STALL")
+    lun = b.ctrl_in(0xA1, 0xFE, 0, 0, 1)
+    if len(lun) == 1:
+        print(f"  ok: MSC GET_MAX_LUN still answered ({lun.hex()})")
+    else:
+        print("  ✗ MSC GET_MAX_LUN no longer answered")
+        ok = False
+    return ok
 
 
 def audio_get_interface(b, iface):
@@ -539,9 +642,41 @@ def audio_set_interface(b, iface, alt):
     b.ctrl_nodata(0x01, 11, alt, iface)
 
 
-def check_cadence(sizes):
-    """The 44.1 kHz iso rate: every packet is 176 or 180 bytes (44/45 frames,
-    stereo s16), and the AVERAGE rate is 44.1 frames per packet.
+def audio_stream_params(cfg, hs):
+    """What the AudioStreaming interface DESCRIBES, read from the config so
+    every scenario measures against the device's own claim: channels, bytes
+    per frame, iso packet size, and the poll interval in ms (speed-dependent:
+    bInterval is 1 ms frames at full speed, 2^(b-1) x 125 us microframes at
+    high speed). Understands UAC1 (Format Type I carries the channel count)
+    and UAC2 (AS_GENERAL carries it; the 2.0 Format Type I is 6 bytes)."""
+    as_num = audio_stream_iface(cfg)
+    cur = None
+    ch = sub = maxpkt = binterval = None
+    for t, d in parse_config(cfg):
+        if t == 4:
+            cur = d[2]
+        elif cur == as_num and t == 0x24 and d[2] == 1 and len(d) == 16:
+            ch = d[10]                               # UAC2 AS_GENERAL
+        elif cur == as_num and t == 0x24 and d[2] == 2:
+            if len(d) == 6:
+                sub = d[4]                           # UAC2 Format Type I
+            else:
+                ch, sub = d[4], d[5]                 # UAC1 Format Type I
+        elif cur == as_num and t == 5:
+            maxpkt = d[4] | d[5] << 8
+            binterval = d[6]
+    if None in (ch, sub, maxpkt, binterval):
+        sys.exit(f"AudioStreaming iface {as_num}: incomplete format "
+                 f"(ch={ch} sub={sub} maxpkt={maxpkt} bInterval={binterval})")
+    interval_ms = (2 ** (binterval - 1)) * 0.125 if hs else float(binterval)
+    return {"iface": as_num, "channels": ch, "frame_bytes": ch * sub,
+            "maxpkt": maxpkt, "interval_ms": interval_ms}
+
+
+def check_cadence(sizes, frame_bytes=4, interval_ms=1.0):
+    """The 44.1 kHz iso rate: every packet carries floor or ceil of
+    44.1 x interval frames (44/45 per 1 ms, 22/23 per 500 us), and the
+    AVERAGE rate is exactly 44.1 x interval frames per packet.
 
     ☠ This used to require every run of 10 packets to carry exactly 441 frames
     (9x44 + 45). That premise died with the rate servo: the payload now nudges
@@ -555,22 +690,28 @@ def check_cadence(sizes):
     not allow.
     """
     ok = True
-    bad = [s for s in sizes if s not in (176, 180)]
+    nominal = 44.1 * interval_ms
+    lo, hi = int(nominal), int(nominal) + 1
+    # The servo's authority is +-0.1 frame PER PACKET at either speed (it
+    # nudges the x100 accumulator step by +-10), so a saturated servo can
+    # emit floor(nominal - 0.1) frames: 21 at high speed. ☠ The bench drains
+    # the ring the instant a packet is queued, so here the servo is ALWAYS
+    # saturated low; the gate can only check that the rate is sane, not that
+    # the servo centres — a real host's pacing is a hardware measurement.
+    allowed = tuple(n * frame_bytes for n in (lo - 1, lo, hi))
+    bad = [s for s in sizes if s not in allowed]
     if bad:
-        print(f"  ✗ {len(bad)}/{len(sizes)} packets not 176/180 B "
+        print(f"  ✗ {len(bad)}/{len(sizes)} packets not one of {allowed} B "
               f"(e.g. {bad[:5]})")
         ok = False
-    frames = sum(sizes) // 4
+    frames = sum(sizes) // frame_bytes
     mean = frames / len(sizes) if sizes else 0
-    # +-0.15 frame/packet: the servo's full authority is +-0.1, so this passes
-    # a correcting stream and fails a stream that has lost the rate entirely.
-    if abs(mean - 44.1) > 0.15:
-        print(f"  ✗ mean {mean:.3f} frames/packet, want 44.1 +- 0.15")
+    tol = 0.15
+    if abs(mean - nominal) > tol:
+        print(f"  ✗ mean {mean:.3f} frames/packet, want {nominal:.2f} +- {tol:.3f}")
         ok = False
-    n45 = sizes.count(180)
-    print(f"  {len(sizes)} packets, {sizes.count(176)}x176 + {n45}x180, "
-          f"mean {mean:.3f} frames/packet "
-          f"{'(rate ok)' if ok else '- RATE WRONG'}")
+    print(f"  {len(sizes)} packets, sizes {sorted(set(sizes))}, mean "
+          f"{mean:.3f} frames/packet {'(rate ok)' if ok else '- RATE WRONG'}")
     return ok
 
 
@@ -659,14 +800,20 @@ def main():
     elif scenario == "validate":
         sys.exit(0 if validate_descriptors(b) else 1)
     elif scenario == "audio-validate":
-        # P1 gate: the 4-interface composite enumerates with the UAC1
-        # AudioStreaming interface + iso EP, MSC + MIDI still intact.
-        sys.exit(0 if validate_audio(b, True) else 1)
+        # P1 gate: the composite enumerates with the UAC2 audio function
+        # (AC + AS + iso EP), MSC + MIDI still intact. "fs" checks the
+        # full-speed config (2 channels).
+        sys.exit(0 if validate_audio(b, "fs" not in sys.argv[3:]) else 1)
+    elif scenario == "audio-uac2-ctrl":
+        # the clock-source class requests a UAC2 host needs, and the stalls
+        sys.exit(0 if uac2_clock_requests(b, "fs" not in sys.argv[3:]) else 1)
     elif scenario == "audio-alt":
         # P2 gate: SET_INTERFACE(3, alt) brings EP3 up/down, observable through
         # GET_INTERFACE and the bench delivering (or not) an iso packet.
-        _, cfg = enumerate_device(b)
-        as_if = audio_stream_iface(cfg)
+        hs = "fs" not in sys.argv[3:]
+        _, cfg = enumerate_device(b, hs)
+        fmt = audio_stream_params(cfg, hs)
+        as_if = fmt["iface"]
         ok = True
         if audio_get_interface(b, as_if) != 0:
             print(f"  ✗ iface{as_if} does not start at alt 0"); ok = False
@@ -677,7 +824,7 @@ def main():
             print("  alt 1 selected")
         # With alt 1 up and the machine producing blocks, an EP3 IN completes.
         try:
-            pk = b.ep_in(3, 180, timeout=5)
+            pk = b.ep_in(3, fmt["maxpkt"], timeout=5)
             print(f"  EP3 delivered {len(pk)} B on alt 1")
             if len(pk) == 0:
                 print("  ✗ EP3 delivered an empty packet on alt 1"); ok = False
@@ -690,52 +837,74 @@ def main():
             print("  alt 0 selected (torn down)")
         # On alt 0 no further packets: the guest stops priming EP3.
         try:
-            b.ep_in(3, 180, timeout=2)
+            b.ep_in(3, fmt["maxpkt"], timeout=2)
             print("  ✗ EP3 still delivered after alt 0"); ok = False
         except TimeoutError:
             print("  EP3 idle on alt 0 (correct)")
         sys.exit(0 if ok else 1)
     elif scenario == "audio-cadence":
         # P3 gate: pull N packets on alt 1 and assert the 44/45-frame cadence.
+        # argv: N [fs]
         n = int(sys.argv[3]) if len(sys.argv) > 3 else 100
-        _, cfg = enumerate_device(b)
-        as_if = audio_stream_iface(cfg)
+        hs = "fs" not in sys.argv[4:]
+        _, cfg = enumerate_device(b, hs)
+        fmt = audio_stream_params(cfg, hs)
+        as_if = fmt["iface"]
+        print(f"  stream: {fmt['channels']} ch, {fmt['frame_bytes']} B/frame, "
+              f"maxpkt {fmt['maxpkt']}, poll {fmt['interval_ms']} ms "
+              f"({'high' if hs else 'full'} speed)")
         audio_set_interface(b, as_if, 1)
         sizes = []
         for _ in range(n):
-            pk = b.ep_in(3, 180, timeout=5)
+            pk = b.ep_in(3, fmt["maxpkt"], timeout=5)
             sizes.append(len(pk))
         audio_set_interface(b, as_if, 0)
-        sys.exit(0 if check_cadence(sizes) else 1)
+        sys.exit(0 if check_cadence(sizes, fmt["frame_bytes"],
+                                    fmt["interval_ms"]) else 1)
     elif scenario == "audio-stream":
         # P4 driver: pull packets on alt 1 into OUTFILE. Keep pulling until the
         # capture has caught a burst (>= a few thousand frames of real audio)
         # plus a tail, so the window is guaranteed to carry audio; hard cap at
         # MAXPKT. argv: OUTFILE [MAXPKT]
+        # argv: OUTFILE [MAXPKT] [fs]. The capture is raw frames of the
+        # described width (frame_bytes, printed); a frame counts as audio when
+        # ANY channel is loud, so a burst on track 5 alone is still a burst.
         out = sys.argv[3]
-        maxpkt = int(sys.argv[4]) if len(sys.argv) > 4 else 60000
-        _, cfg = enumerate_device(b)
-        as_if = audio_stream_iface(cfg)
+        opts = sys.argv[4:]
+        maxpkt = next((int(o) for o in opts if o.isdigit()), 60000)
+        hs = "fs" not in opts
+        # frames=N: keep capturing until N frames are in hand (a walk with
+        # several bursts), instead of stopping after the first burst.
+        want_frames = next((int(o[7:]) for o in opts if o.startswith("frames=")), 0)
+        _, cfg = enumerate_device(b, hs)
+        fmt = audio_stream_params(cfg, hs)
+        as_if, fb = fmt["iface"], fmt["frame_bytes"]
+        print(f"  stream: {fmt['channels']} ch, {fb} B/frame, maxpkt "
+              f"{fmt['maxpkt']}, poll {fmt['interval_ms']} ms")
         audio_set_interface(b, as_if, 1)
         data = bytearray()
         nz = 0
         caught_at = None
         for i in range(maxpkt):
-            pk = b.ep_in(3, 180, timeout=5)
-            for off in range(0, len(pk) - 3, 4):
-                l = int.from_bytes(pk[off:off + 2], "little", signed=True)
-                r = int.from_bytes(pk[off + 2:off + 4], "little", signed=True)
-                if abs(l) > 64 or abs(r) > 64:
+            pk = b.ep_in(3, fmt["maxpkt"], timeout=5)
+            for off in range(0, len(pk) - fb + 1, fb):
+                if any(abs(int.from_bytes(pk[off + c:off + c + 2], "little",
+                                          signed=True)) > 64
+                       for c in range(0, fb, 2)):
                     nz += 1
             data += pk
+            if want_frames:
+                if len(data) // fb >= want_frames:
+                    break
+                continue
             if caught_at is None and nz >= 4000:
-                caught_at = len(data) // 4         # a burst is in hand
-            if caught_at is not None and len(data) // 4 - caught_at > 8000:
+                caught_at = len(data) // fb        # a burst is in hand
+            if caught_at is not None and len(data) // fb - caught_at > 8000:
                 break                              # got the burst + a tail
         audio_set_interface(b, as_if, 0)
         open(out, "wb").write(data)
-        print(f"wrote {len(data)} B ({len(data)//4} frames, {nz} with audio) "
-              f"to {out}")
+        print(f"wrote {len(data)} B ({len(data)//fb} frames of {fb} B, "
+              f"{nz} with audio) to {out}")
         sys.exit(0 if nz >= 2000 else 1)
     elif scenario == "enum-conform":
         # P3 gate: structural descriptor validity + the standard requests a

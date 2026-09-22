@@ -2,8 +2,9 @@
 | usb-audio-tramp.s — the in-image trampoline for the USB-audio payload.
 |
 | Linked by custom/usb-audio.py into the 408 B of image free space left after
-| usb-midi's overlay (0x400d2b44). It is the ONLY new code that lives in the
-| image; everything else runs from SDRAM scratch.
+| usb-midi's overlay (0x400d2b44). Together with the allocator, reporter and
+| guard it is the only new code that lives in the image; everything else runs
+| from the heap pages the payload is loaded into.
 |
 | Hooked into fs_card_detect_poll (0x4003f174), a task-context leaf polled by
 | the card/UI task — task context is required because loading the payload does
@@ -13,8 +14,9 @@
 | the hooks). Run-once, and a no-op if the card file is absent — an image
 | without /USBAUDIO.BIN then behaves exactly as the stock usb-midi composite.
 |
-| defsyms from usb-audio.py: PAYLOAD_BASE (0x48001000), PAYLOAD_MAGIC,
-| PAYLOAD_MAX. The entry point comes from the payload's own header.
+| defsyms from usb-audio.py: PAYLOAD_BASE (the link base; the load address
+| comes from the allocator or --load-base), PAYLOAD_MAGIC, PAYLOAD_MAX. The
+| entry point comes from the payload's own header.
 
 .ifndef HAVE_GUARD
 .set HAVE_GUARD, 0

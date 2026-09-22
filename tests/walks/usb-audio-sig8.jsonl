@@ -1,0 +1,20 @@
+# USB-audio 16-channel signature walk, on out/sig8 (tests/build-sig-fixture.sh:
+# track N plays a one-shot stereo tone, 200+50*(2N-1) / 200+50*(2N) Hz, so all
+# sixteen USB channels carry distinct frequencies). Announce "ready" so the
+# harness starts capturing, then PLAY fires the eight one-shots together and
+# the tones run out gap-free for the rest of the capture. Every wait is GUEST
+# time. The first gesture is 16 s after PTCH (tests/walks/trig-one.jsonl).
+#
+# ☠ PLAY is a PLAIN tap, not a self-verifying one. A tap carrying a lamp
+# condition is redone when the condition is not met in time, and a second
+# PLAY restarts the sequencer with the one-shots already fired and disarmed:
+# measured as 5 s of tones then silence, and 0/16 channels loud. A lost tap
+# fails the gate honestly (nothing loud); a redone one fails it misleadingly.
+{"wait_text":"PTCH","timeout_ms":600000}
+{"wait_guest_ms":8000}
+{"mark":"ready"}
+{"wait_guest_ms":8000}
+{"tap":"PLAY"}
+{"mark":"playing"}
+{"wait_guest_ms":60000}
+{"mark":"done"}

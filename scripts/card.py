@@ -5,6 +5,8 @@ MBR plus mtools for the filesystem. Same behaviour on macOS and Linux.
 
   scripts/card.py create IMG MiB        MBR + empty FAT32, atomically
   scripts/card.py copy IMG SRC DST      host SRC -> card path DST
+  scripts/card.py extract IMG SRC DIR   card SRC (file or directory) -> host DIR
+  scripts/card.py copytree IMG SRC DST  host directory SRC -> card directory DST
   scripts/card.py ls IMG [DIR]          full card paths, dirs first
   scripts/card.py finddir IMG NAME      first directory whose name is NAME
 
@@ -122,6 +124,20 @@ def copy(path, src, dst):
     mtool(["mcopy", "-i", img(path), "-o", src, f"::{dst}"])
 
 
+def extract(path, src, dstdir):
+    """card path SRC (a file, or a directory copied recursively) -> host
+    directory DSTDIR, created if needed."""
+    os.makedirs(dstdir, exist_ok=True)
+    mtool(["mcopy", "-i", img(path), "-s", "-n", f"::{src}", dstdir])
+
+
+def copytree(path, src, dst):
+    """host directory SRC -> the card, recursively, as directory DST."""
+    if not os.path.isdir(src):
+        die(f"{src}: not a directory")
+    mtool(["mcopy", "-i", img(path), "-s", "-o", src, f"::{dst}"])
+
+
 def ls(path, top="/"):
     out = mtool(["mdir", "-/", "-b", "-i", img(path), f"::{top}"])
     return [l[2:] for l in out.splitlines() if l.startswith("::/")]
@@ -143,6 +159,10 @@ def main():
         create(a[1], int(a[2]))
     elif cmd == "copy" and len(a) == 4:
         copy(a[1], a[2], a[3])
+    elif cmd == "extract" and len(a) == 4:
+        extract(a[1], a[2], a[3])
+    elif cmd == "copytree" and len(a) == 4:
+        copytree(a[1], a[2], a[3])
     elif cmd == "ls" and len(a) in (2, 3):
         print("\n".join(ls(a[1], a[2] if len(a) == 3 else "/")))
     elif cmd == "finddir" and len(a) == 3:
