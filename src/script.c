@@ -663,6 +663,7 @@ bool script_step(void)
             /* A verified tap re-taps once its window closes without the
              * condition holding: the key was lost, not merely slow. */
             if (met == 0 && S.s.action == A_TAP && guest_ms() >= S.t_verify) {
+                fprintf(stderr, "octemu: re-tap (key lost) at: %s", S.line);
                 S.taps_left = (int)S.s.taps;
                 S.gone_streak = 0;
                 tap_down();
