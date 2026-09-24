@@ -5,6 +5,8 @@
 # Idempotent.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# shellcheck source=/dev/null
+[ -f opt.env ] && . ./opt.env   # optimized-build flags; scripts/build-opt.sh
 
 BASE=$(head -1 patches/qemu/BASE_COMMIT.txt | awk '{print $1}')
 DST=vendor/qemu
@@ -58,7 +60,9 @@ cd "$DST"
 # meson's builtin b_lto; there is no --enable-lto in this QEMU).
 OCTATRACK_DSP56300=$DSPSRC OCTATRACK_DSP56300_BUILD=$DSPBLD \
     ./configure --target-list=m68k-softmmu --enable-plugins --disable-werror \
-        ${QEMU_EXTRA_CONFIGURE:-} >/dev/null
+        ${OT_QEMU_CONFIGURE:-} ${QEMU_EXTRA_CONFIGURE:-} \
+        --extra-cflags="${OT_OPT_CFLAGS:-}" --extra-cxxflags="${OT_OPT_CFLAGS:-}" \
+        --extra-ldflags="${OT_OPT_LDFLAGS:-}" >/dev/null
 ninja -C build qemu-system-m68k -j "$JOBS"
 
 ./build/qemu-system-m68k -M help | grep -q '^octatrack ' \

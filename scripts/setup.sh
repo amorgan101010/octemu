@@ -21,17 +21,7 @@ for p in patches/dsp56300/0*.patch; do
     git -C "$DSP" apply "$(pwd)/$p"
     echo "   applied $(basename "$p")"
 done
-# RelWithDebInfo, never Release: base.cmake appends -flto to Release on macOS,
-# which puts LLVM bitcode in the archives instead of object code.
-cmake -S "$DSP" -B "$DSP/build" -DCMAKE_BUILD_TYPE=RelWithDebInfo >/dev/null
-cmake --build "$DSP/build" --target dsp56kEmu -j "$(sysctl -n hw.ncpu 2>/dev/null || nproc)"
-for a in dsp56kEmu/libdsp56kEmu dsp56kBase/libdsp56kBase asmjit/libasmjit; do
-    f=$DSP/build/source/$a.a
-    [ -f "$f" ] || { echo "missing $f" >&2; exit 1; }
-    m=$(ar t "$f" | grep -m1 '\.o$')
-    ar p "$f" "$m" | file -b - | grep -qi bitcode && { echo "$f is LLVM bitcode — rebuild RelWithDebInfo" >&2; exit 1; }
-done
-echo "   ok: three archives, object code"
+scripts/build-dsp.sh
 
 echo "== elektron-firmware-tool =="
 EFT=vendor/elektron-firmware-tool

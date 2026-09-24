@@ -22,3 +22,5 @@
 .DS_Store
 __pycache__/
 .claude/
+# local optimized-build flags written by scripts/build-opt.sh
+/opt.env
