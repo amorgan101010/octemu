@@ -809,12 +809,18 @@ static void monitor_cb(void *unused, Uint8 *stream, int len)
                 /* ~3 s normally; ~0.5 s while the cushion is in its
                  * emergency band, so a slow boot's low reading does not keep
                  * playback slow until the ring overfills and laps. */
+                /* Asymmetric: follow an OVERFULL cushion fast, but never chase
+                 * a dip fast — a card load stalls the producer for a second or
+                 * two, and following it down (measured: to 0.10) is a pitch
+                 * dive; holding the last sample briefly is far less audible.
+                 * The floor keeps a slow host playable without letting a
+                 * stall drag the pitch through the floor. */
                 const double e = (avail - kAim) / (double)kAim;
-                const double tau = (e < -0.8 || e > 0.9) ? 0.5 : 3.0;
+                const double tau = e > 0.9 ? 0.5 : 3.0;
                 const double a = (now - g_mon.t_mark) / tau;
 
                 g_mon.rate += (a > 1.0 ? 1.0 : a) * (meas - g_mon.rate);
-                if (g_mon.rate < 0.1)  g_mon.rate = 0.1;
+                if (g_mon.rate < 0.5)  g_mon.rate = 0.5;
                 if (g_mon.rate > 1.05) g_mon.rate = 1.05;
             }
             g_mon.t_mark = now;
