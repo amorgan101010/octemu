@@ -29,8 +29,20 @@ measured. Commit messages on this branch carry the detail.
 | -O3 dsp56300 + GCC LTO | 5560 | 0.73x |
 | + GCC PGO | 5090 | 0.79x |
 | + idle skip | ~3600 | holds real time |
+| + pacing repays lateness (headless realtime 0.98 -> 1.000) | ~3620 | 1.000x |
+| + macOS agent's qemu 0015/0017 + dsp 0012 (merged 9217770) | ~3000-3120 | 1.000x |
 
-Effective clock under load is ~3.9 GHz here, so ~3600 is only ~8% headroom.
+Effective clock under load is ~3.9 GHz here, so ~3100 is ~25% headroom
+headless. The merge passed test-dsp, test-dsp-metro, test-emu, test-emu-audio
+3/3, and keys-72 (only the documented post-boot PLAY re-tap).
+
+**Real-session caveat (Linux):** in the user's windowed session with a heavier
+patch (comb filter on noise), a pre-merge build ran at ~0.91x real time and the
+live monitor, following that rate, played ~150 cents flat and wandering. The
+recorded output of that session (`--recording`) was rock steady: 146.55 Hz,
+0.02 cents std over 50 s. So the emulation itself is sample-exact; the warble
+is purely a capacity shortfall fed through the monitor. Headless sine-trig
+benchmarks overstate headroom for real use by ~10%+.
 
 ## What changed, and whether it touches macOS
 
@@ -66,11 +78,17 @@ Effective clock under load is ~3.9 GHz here, so ~3600 is only ~8% headroom.
 
 ## Open / next
 
-- **DSP is now ~56% of the cost** (JIT 31%, native peripherals/DMA/HDI08 26%).
-  In progress: rebasing octemu's 11 dsp56300 patches onto the faster
-  gearmulator MD/MM fork of dsp56300 (amorgan101010/dsp56300-md-mm, b6ee02ca).
-  0001/0002 are already fixed there; 0003/4/6/9/10/11 apply; 0005/0007/0008
-  hand-ported. Not yet built or A/B'd.
+- **DSP is ~56% of the cost** (JIT 31%, native peripherals/DMA/HDI08 26%).
+  TRIED AND REJECTED: swapping in the gearmulator MD/MM fork of dsp56300
+  (amorgan101010/dsp56300-md-mm @ b6ee02ca) with octemu's 11 patches rebased
+  (0001/0002 already fixed there, 0005/0007/0008 hand-ported, plus your 0012).
+  Functionally fine (test-dsp, metro, test-emu, audio 3/3), but **~10% SLOWER**
+  (LTO A/B: 3336 -> 3685 Mcycles/emu-s): its reworked HDI08 (host-command
+  arbitration, RX rate limit) and pending-DMA modelling cost more on the
+  Octatrack's traffic than its JIT gains save. Rebase kept in
+  ~/Documents/octemu/work/dsp-fork (Linux box) if individual commits are worth
+  cherry-picking later. Note: that fork has the same latent
+  RingBuffer::emplace_back(count) bug your dsp 0012 fixes (no callers there).
 - Remaining hot native symbols: `DmaChannel::execTransfer` 5%,
   `HDI08::readRX/exec/writeRX` ~10%, TCG tb lookup/restore ~8%, EMAC helpers 6%.
 - **Pre-existing flake**: `--gdb` runs stall after boot ~50% of the time on
