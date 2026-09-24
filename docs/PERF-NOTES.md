@@ -535,3 +535,27 @@ Identical beat numbers and median body (2281) to Linux, so the emulation is
 deterministic across hosts and the Mac can validate a race fix too.
 `tests/trig8-body.py` needs numpy: `brew install numpy` on macOS (Homebrew's
 python refuses a plain pip install).
+
+### macOS: lockstep fix (74930ca) validated; 0017 loading data point
+
+On the M1 Air, clang PGO+LTO rebuilt on 74930ca:
+
+- `tests/trig8-repro.sh` x3: `[]` every run (0 / 252 beats). test-emu-audio
+  3/3, keys-72: 72/72 and **no** post-boot PLAY re-tap this time. Paced cost
+  ~1 point (interleaved: 95.0-97.1% vs 96.4-97.3%, boot included).
+- lockstep + 0017 (test binary, not shipped): trig8 `[]`, `[]` — agrees with
+  your 0 / 672.
+- **0017's project-load slowdown is much smaller here, and zero in wall time.**
+  trig8 fixture, walk = mark at PTCH, wait 3 s, wait_gone L0ADING, mark
+  (so the 3 s wait is inside both numbers):
+
+  | build | PTCH -> loaded, guest | wall |
+  |---|---|---|
+  | lockstep | 3.27 s, 3.27 s | 5.35 s, 5.20 s |
+  | lockstep + 0017 | 5.01 s, 4.00 s | 5.11 s, 4.42 s |
+
+  i.e. +0.7-1.7 s of guest time and no wall-clock cost, vs ~5x guest on the
+  5600G. Guest time running further per wall second during the card reads
+  suggests the difference is in how the load's MMIO/ATA polling interacts
+  with pacing (catch-up / idle skip) on each host, not in the reads
+  themselves. Happy to run any candidate on the Mac.
