@@ -82,7 +82,10 @@ namespace {
 std::atomic<bool> g_running {true};   /* cleared from atexit, on another thread */
 
 uint64_t g_prodFF, g_holdTx, g_holdDeliver, g_holdOther;
-uint64_t g_shipNonzero, g_blocksLate;
+uint64_t g_shipNonzero, g_blocksLate, g_resyncs;
+/* How far behind the pace a block may fall before the debt is forgiven; see
+ * closeBlock. */
+constexpr auto kMaxDebt = std::chrono::milliseconds(150);
 /* How often the delivery hold's wall-clock escape actually fires, and the
  * wall it let go of. The hold's PRIMARY release is the sum landing; the
  * escape exists for a delivery that never completes. Measured: the worst
@@ -676,9 +679,22 @@ void closeBlock()
     const auto period = blockPeriod();
     const auto now = std::chrono::steady_clock::now();
 
+    /*
+     * ☠ REPAY LATENESS, don't forgive it. This used to resync the schedule
+     * on anything a full period (363 us) late, so every heavy block (a card
+     * read, a UI redraw, a JIT compile) lost its overrun for good: the stream
+     * averaged below real time and the live monitor's rate servo turned the
+     * shortfall into pitch — the warble. With headroom above real time the
+     * guest can instead run ahead unslept until it is back on schedule. Only
+     * a genuine stall (kMaxDebt, well inside the monitor's 250 ms cushion)
+     * resyncs.
+     */
     g_deadline += period;
     if (now - g_deadline > period) {
-        g_blocksLate++;
+        g_blocksLate++;                     /* behind; catching up */
+    }
+    if (now - g_deadline > kMaxDebt) {
+        g_resyncs++;                        /* a real stall: give up the debt */
         g_deadline = now;
     } else if (g_deadline > now) {
         std::this_thread::sleep_until(g_deadline);
@@ -1001,7 +1017,7 @@ void ot_dsp_stats(char *buf, size_t len)
 
     o = (size_t)snprintf(buf, len,
              "throttle=%s ilv=%u blocks=%llu renders=%llu esai_blocks=%llu ship_nz=%llu "
-             "in_underruns=%llu out_drop=%llu late=%llu "
+             "in_underruns=%llu out_drop=%llu late=%llu resyncs=%llu "
              "hatch=%llu hatch_us=%llu | "
              "PER-BLK ff=%.0f execs=%.0f holds tx=%.2f dlv=%.2f oth=%.2f "
              "ticks=%.0f (ran=%.0f held=%.0f) | "
@@ -1018,6 +1034,7 @@ void ot_dsp_stats(char *buf, size_t len)
              (unsigned long long)g_in.underruns,
              (unsigned long long)g_out.dropped,
              (unsigned long long)g_blocksLate,
+             (unsigned long long)g_resyncs,
              (unsigned long long)g_holdHatch,
              (unsigned long long)g_holdHatchUs,
              (double)g_prodFF / (double)nb,

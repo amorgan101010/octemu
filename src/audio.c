@@ -676,6 +676,9 @@ static struct {
      * is reported at exit — always, not behind a flag. A correct monitor holds
      * the ratio near the Octatrack's pace; drift shows up here as cents. */
     double lo, hi;
+    /* wall-clock rate measurement and the filtered level error */
+    double t_mark, err_f, t0, slo, shi, t_log;
+    uint64_t w_mark, starved_log;
 } g_mon;
 
 /*
@@ -693,6 +696,7 @@ static struct {
  * this is 250 — the cheapest setting the evidence supports. Do not tune it
  * against a single run.
  */
+static int g_mon_log = -1;              /* OCTEMU_MON_LOG=1: per-second trace */
 static unsigned kAim = RATE / 4;       /* --audio-cushion overrides it */
 /* SDL device buffer, frames: --audio-buffer overrides it. */
 static unsigned g_dev_samples = 512;
@@ -706,9 +710,6 @@ void audio_set_buffers(unsigned dev_samples, unsigned cushion_ms)
         kAim = (unsigned)((uint64_t)RATE * cushion_ms / 1000);
     }
 }
-/* Anchor creep per callback (~23 s time constant at 512 frames) and the two
- * level-trim gains. */
-static const double kAnchorCreep = 0.0005, kTrimP = 0.02, kTrimQ = 0.10;
 
 static void monitor_push(const int32_t out[FRAMES][SLOTS])
 {
@@ -737,6 +738,9 @@ static void monitor_cb(void *unused, Uint8 *stream, int len)
     double avail, inst, err;
 
     (void)unused;
+    if (g_mon_log < 0) {
+        g_mon_log = getenv("OCTEMU_MON_LOG") != NULL;
+    }
     if (!g_mon.primed) {
         if (w < kAim) {                       /* wait for a cushion */
             memset(stream, 0, (size_t)len);
@@ -771,23 +775,81 @@ static void monitor_cb(void *unused, Uint8 *stream, int len)
     }
 
     avail = (double)w - g_mon.rd;
-    inst = (double)(w - g_mon.w_prev) / (double)n;
-    g_mon.w_prev = w;
-    if (inst > 0.0) {
-        g_mon.rate += kAnchorCreep * (inst - g_mon.rate);
+    (void)inst;
+    /*
+     * ☠ THE RATIO IS THE PITCH, so it must move slowly and little.
+     *
+     * The anchor used to creep toward (frames arrived) / (frames asked for)
+     * PER CALLBACK. That only means "the Octatrack's rate" if callbacks are
+     * perfectly regular; a PipeWire/Pulse sink that pulls in uneven batches
+     * sent it to 1.55 and the ratio across 806 cents (measured, null sink).
+     * Measure the producer against the WALL CLOCK instead, over half-second
+     * windows, smoothed over ~10 s: with the throttle holding real time that
+     * is 1.000, on a slower host it is whatever the host sustains — steady
+     * either way.
+     *
+     * The buffer level then only TRIMS it, low-passed over ~2 s and capped at
+     * +-0.5% (+-9 cents), with a wider emergency band only when the cushion is
+     * nearly empty or nearly double. The old trim (2% + 10% quadratic, per
+     * callback) followed every stall and burst, which is the warble.
+     */
+    {
+        const double now = SDL_GetPerformanceCounter()
+                         / (double)SDL_GetPerformanceFrequency();
+        const double cb = (double)n / RATE;       /* this callback's span, s */
+
+        if (g_mon.t_mark == 0.0) {
+            g_mon.t_mark = now;
+            g_mon.w_mark = w;
+        } else if (now - g_mon.t_mark >= 0.5) {
+            const double meas = (double)(w - g_mon.w_mark)
+                              / ((now - g_mon.t_mark) * RATE);
+
+            if (meas > 0.05 && meas < 2.0) {
+                /* ~3 s normally; ~0.5 s while the cushion is in its
+                 * emergency band, so a slow boot's low reading does not keep
+                 * playback slow until the ring overfills and laps. */
+                const double e = (avail - kAim) / (double)kAim;
+                const double tau = (e < -0.8 || e > 0.9) ? 0.5 : 3.0;
+                const double a = (now - g_mon.t_mark) / tau;
+
+                g_mon.rate += (a > 1.0 ? 1.0 : a) * (meas - g_mon.rate);
+                if (g_mon.rate < 0.1)  g_mon.rate = 0.1;
+                if (g_mon.rate > 1.05) g_mon.rate = 1.05;
+            }
+            g_mon.t_mark = now;
+            g_mon.w_mark = w;
+        }
+        err = (avail - kAim) / (double)kAim;
+        g_mon.err_f += (cb / 2.0 > 1.0 ? 1.0 : cb / 2.0) * (err - g_mon.err_f);
+
+        double trim = 0.01 * g_mon.err_f;
+        if (trim > 0.005)  trim = 0.005;
+        if (trim < -0.005) trim = -0.005;
+        if (err < -0.8 || err > 0.9) {            /* emergency: really draining/overfull */
+            trim = 0.03 * (err < 0 ? -1.0 : 1.0);
+        }
+        g_mon.ratio = g_mon.rate * (1.0 + trim);
+        if (g_mon.ratio < 0.02) g_mon.ratio = 0.02;
+        if (g_mon.ratio > 4.0)  g_mon.ratio = 4.0;
+
+        if (!g_mon.lo || g_mon.ratio < g_mon.lo) g_mon.lo = g_mon.ratio;
+        if (g_mon.ratio > g_mon.hi) g_mon.hi = g_mon.ratio;
+        if (g_mon_log && now - g_mon.t_log >= 1.0) {   /* OCTEMU_MON_LOG=1 */
+            fprintf(stderr, "octemu: mon t=%.0f rate=%.4f ratio=%.4f avail=%.0fms "
+                    "starved+%llu\n", now - g_mon.t0, g_mon.rate, g_mon.ratio,
+                    1000.0 * avail / RATE,
+                    (unsigned long long)(g_mon.starved - g_mon.starved_log));
+            g_mon.t_log = now;
+            g_mon.starved_log = g_mon.starved;
+        }
+        if (g_mon.t0 == 0.0) {
+            g_mon.t0 = now;
+        } else if (now - g_mon.t0 > 5.0) {        /* steady-state spread */
+            if (!g_mon.slo || g_mon.ratio < g_mon.slo) g_mon.slo = g_mon.ratio;
+            if (g_mon.ratio > g_mon.shi) g_mon.shi = g_mon.ratio;
+        }
     }
-    /* The buffer level only TRIMS the anchor, through a proportional term that
-     * cannot accumulate. The quadratic term is idle in the normal band (0.1%
-     * at err=0.1) and gives the loop authority only when the buffer really is
-     * draining. */
-    err = (avail - kAim) / (double)kAim;
-    if (err > 1.0)  err = 1.0;
-    if (err < -1.0) err = -1.0;
-    g_mon.ratio = g_mon.rate * (1.0 + kTrimP * err + kTrimQ * err * fabs(err));
-    if (g_mon.ratio < 0.02) g_mon.ratio = 0.02;
-    if (g_mon.ratio > 4.0)  g_mon.ratio = 4.0;
-    if (!g_mon.lo || g_mon.ratio < g_mon.lo) g_mon.lo = g_mon.ratio;
-    if (g_mon.ratio > g_mon.hi) g_mon.hi = g_mon.ratio;
 
     for (int i = 0; i < n; i++) {
         const uint64_t idx = (uint64_t)g_mon.rd;
@@ -997,6 +1059,10 @@ done:
                 g_mon.lo, g_mon.hi,
                 1200.0 * log2(g_mon.hi / (g_mon.lo > 0 ? g_mon.lo : 1)),
                 g_mon.rate, (unsigned long long)g_mon.starved);
+        if (g_mon.slo > 0) {
+            fprintf(stderr, "octemu: monitor after 5 s: ratio %.4f-%.4f (%.1f cents)\n",
+                    g_mon.slo, g_mon.shi, 1200.0 * log2(g_mon.shi / g_mon.slo));
+        }
     }
     free(rgb);
     return NULL;

@@ -748,6 +748,25 @@ int main(int argc, char **argv)
          * wait for a real frame, then none once the order was this. */
         audio_video_tick();
         SDL_RenderPresent(ren);
+        /* ☠ A frame cap for when vsync is not in force (offscreen, some
+         * compositors): SDL_RENDERER_PRESENTVSYNC is a request, and without it
+         * this loop redraws the whole panel as fast as it can. Measured with
+         * the offscreen driver: the frontend at ~50% of a core, the emulator's
+         * vCPU saturated and behind the pace on every block while doing the
+         * same guest work as a headless run — the redraw thrashes the cache
+         * the vCPU shares. 60 fps is plenty for a panel; with vsync at 60 Hz
+         * the present has already blocked and this sleeps nothing. */
+        {
+            static uint64_t last;
+            const uint64_t now = SDL_GetPerformanceCounter();
+            const uint64_t hz = SDL_GetPerformanceFrequency();
+            const uint64_t frame = hz / 60;
+
+            if (last && now - last < frame) {
+                SDL_Delay((Uint32)((frame - (now - last)) * 1000 / hz));
+            }
+            last = SDL_GetPerformanceCounter();
+        }
     }
 
     {
