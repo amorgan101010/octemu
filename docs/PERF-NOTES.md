@@ -521,3 +521,17 @@ Built with clang LTO + PGO retrained on this tree; every check rerun:
   sdl2-compat` — Homebrew's sdl2 is now sdl2-compat, which reports mouse
   events in pixels on Retina, so every click landed at 2x (not perf, but
   every current Mac build needs it).
+
+### macOS: trig8 repro confirmed (964d226)
+
+`tests/trig8-repro.sh` on the M1 Air, 2 runs each, same fixture:
+
+| build | drops |
+|---|---|
+| current `linux` (no 0017), clang PGO+LTO | `[]`, `[]` (84/84 beats) |
+| with 0017 | `[9, 17, 25, 33, 41, 49, 57, 65, 73, 81]` both runs |
+
+Identical beat numbers and median body (2281) to Linux, so the emulation is
+deterministic across hosts and the Mac can validate a race fix too.
+`tests/trig8-body.py` needs numpy: `brew install numpy` on macOS (Homebrew's
+python refuses a plain pip install).
