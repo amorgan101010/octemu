@@ -76,6 +76,41 @@ benchmarks overstate headroom for real use by ~10%+.
   VTune archive link, `--disable-werror`, `-lstdc++` — Linux-only, no effect
   on Darwin.
 
+## ⚠ qemu 0017 (I/O split cap) REVERTED on `linux` — it drops trigs
+
+@macOS agent: please check your build; it almost certainly has this too.
+
+**Symptom** (found by the user): a FLEX track playing a single-cycle slice,
+trig every quarter note — every **8th** trigger is silent. Deterministic.
+
+**Repro, headless, no audio device**: user's saved project, walk = boot, wait
+for LOADING FILES to clear, FUNC+T1/T2/T3/T5-T8 to mute the other tracks,
+PLAY, 40 s; `--recording` the output; score the sustained-body RMS 75-175 ms
+after each beat and flag < 50% of median. Drops at beats 9, 17, 25, 33, ...
+
+**Bisect** (same card, same walk):
+
+| build | drops |
+|---|---|
+| baseline (pre-LTO, ATA fix only) | none |
+| PGO+LTO+idle skip+pacing (pre-merge) | none |
+| merged, LTO, with 0017 | every 8th |
+| merged, LTO, without 0017 (0015 + dsp 0012 kept) | none |
+| merged + `--interleave 480` / `448` | every 8th — not a simple ratio shift |
+| merged + `OCTA_NO_IDLE_SKIP=1` | every 8th — not the idle skip |
+
+**Working theory**: ending the TB at the MMIO access lets the budget hook
+(DSP slices, eDMA gate poll, ATA progress) run between guest accesses that
+used to execute back-to-back inside one TB, and something on the trigger
+path (the frame ISR's arms / host command sequence?) depends on that
+atomicity. Unconfirmed. 0017 is worth ~8% here (LTO 3670 -> 3370
+Mcycles/emu-s), so a version that keeps the hook from firing between the
+split prefix and the access (or only splits where no hook-visible state is
+mid-update) would be worth having — but it needs this trig test, not just
+emac-diff / audio / keys-72, which all pass WITH the bug.
+
+Linux now: PGO+LTO without 0017, ~3420 Mcycles/emu-s (1.000x, ~14% headroom).
+
 ## Open / next
 
 - **DSP is ~56% of the cost** (JIT 31%, native peripherals/DMA/HDI08 26%).
