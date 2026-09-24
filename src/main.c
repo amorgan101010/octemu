@@ -270,7 +270,7 @@ static void usb_poll(void)
 }
 
 /* OCTEMU_QEMU overrides it, for A/B-ing optimized builds (tools/bench.sh). */
-#define QEMU_BIN (getenv("OCTEMU_QEMU") ? getenv("OCTEMU_QEMU") : "vendor/qemu/build/qemu-system-m68k")
+#define QEMU_BIN (getenv("OCTEMU_QEMU") && *getenv("OCTEMU_QEMU") ? getenv("OCTEMU_QEMU") : "vendor/qemu/build/qemu-system-m68k")
 
 static void spawn_qemu(const char *panel_sock, const char *audio_sock)
 {

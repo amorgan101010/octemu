@@ -80,6 +80,61 @@ benchmarks overstate headroom for real use by ~10%+.
 
 @macOS agent: please check your build; it almost certainly has this too.
 
+### Run the repro yourself
+
+```sh
+tests/trig8-repro.sh mylabel                       # the current build
+OCTEMU_QEMU=/path/qemu tests/trig8-repro.sh other  # another binary
+OCTEMU_ARGS="--interleave 1024" tests/trig8-repro.sh il1024
+```
+
+Fixture: `tests/fixtures/trig8/` — the user's real project (set tarball +
+NVRAM, 5.7 MB; AKWF single-cycle chains + a white-noise sample; the slice is
+on T4, FLEX, trig every quarter note at 120 BPM) and the walk. The script
+builds a fresh 256 MiB card, boots headless `--read-only`, waits out LOADING
+FILES, mutes T1-T3/T5-T8, PLAYs, records 40 s (`--recording`, sample-exact,
+no audio device), and `tests/trig8-body.py` scores each beat's sustained body
+(RMS 75-175 ms after the beat, flagged below 50% of median). Clean:
+`drops at beats []`, exit 0. The bug: `[9, 17, 25, ...]`, exit 1. The WAV is
+kept at `out/trig8-<label>.wav`. ~60 s per run on the 5600G.
+
+### What the investigation found (after the bisect below)
+
+- **It is a ColdFire:DSP ratio sensitivity, and 0017 only moves the ratio.**
+  WITHOUT 0017, `--interleave 1024` — one of the two values the upstream code
+  calls calibrated — drops every 8th trig identically. 512 is on the good
+  side; 0017's exact counting moves the effective ratio across. With 0017,
+  384/448/480/512/1024 all drop; 256 breaks differently (with or without).
+- The CPU->DSP arm stream (`--capture-dsp`, now `OCTA_CAPTURE_BLOCKS=N` for a
+  longer window) is **identical** at the silent beats in both builds — the
+  firmware sends the same data; what differs is where it lands in DSP time.
+- Not the FIFO stall path: making the full-FIFO drain step both cores in
+  kCoreSlice alternation (instead of `c.step(256)` alone) changed nothing,
+  although 0017 does raise `stalls` 4 -> 44.
+- Not a polling timeout: the firmware's host-port polls
+  (`dsp_record_loader`, `dsp_bootstrap_feed`) are unbounded and boot-only.
+- `docs/experiments/0018-io-split-budget-compat.patch` (NOT applied): keep
+  0017's speed but charge a capped TB the uncapped TB's length, like stock.
+  Removes the deterministic every-8th drop but leaves sporadic ones
+  ([2] / [48, 77] / [] over 3 runs) — not equivalent to stock accounting.
+  A real fix probably means understanding the DSP-side race (why every 8th
+  trig; 8 voices? an 8-entry ring?) rather than tuning counts.
+- **The race exists upstream too, just rarely.** 8 runs x 84 beats each, 4
+  runs in parallel (tests/trig8-repro.sh; runs with a lost mute tap — median
+  body far from ~2281, or != 84 beats — excluded):
+
+  | build | drops |
+  |---|---|
+  | stock baseline (before any perf work) | 3 / 672 beats (3 of 8 runs) |
+  | pre-merge PGO + idle skip + pacing | 2 / 588 (2 of 7) |
+  | current `linux` (merge minus 0017) | 1 / 672 (1 of 8) |
+  | with 0017 | every 8th trig, every run |
+
+  So the perf work did not introduce it, and 0017 does not create it — it
+  turns a ~0.3% sporadic drop into a deterministic one. The fix wanted is for
+  the underlying race, which would also make 0017 safe to bring back.
+- Shipped on `linux`: no 0017, PGO+LTO.
+
 **Symptom** (found by the user): a FLEX track playing a single-cycle slice,
 trig every quarter note — every **8th** trigger is silent. Deterministic.
 

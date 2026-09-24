@@ -141,7 +141,14 @@ static void ot_capture_emit(const OtCapArm *a)
                 (a->data[2 * i] << 8) | a->data[2 * i + 1]);
     }
     fputc('\n', ot_capture_fp);
-    if (a->bytes == 128 && ++ot_capture_blocks >= 1200) {
+    static unsigned limit;
+
+    if (!limit) {                       /* OCTA_CAPTURE_BLOCKS overrides 1200 */
+        const char *e = getenv("OCTA_CAPTURE_BLOCKS");
+
+        limit = e && atoi(e) > 0 ? (unsigned)atoi(e) : 1200;
+    }
+    if (a->bytes == 128 && ++ot_capture_blocks >= limit) {
         fclose(ot_capture_fp);
         ot_capture_fp = NULL;
         info_report("octatrack: DSP capture complete");

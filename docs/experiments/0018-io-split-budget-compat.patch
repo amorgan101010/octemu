@@ -1,0 +1,137 @@
+EXPERIMENT, NOT APPLIED: charge an I/O-capped TB like the TB it replaced
+
+Applies on top of patches/qemu/0017-io-split-cap.patch (reverted on `linux`;
+recover it with `git show ee1d1e8:patches/qemu/0017-io-split-cap.patch`).
+
+0017 caps a TB at its MMIO access and therefore counts the guest-instruction
+budget exactly; stock QEMU's split path charged the whole original TB, then
+ran the access in an uncounted CF_NOIRQ TB, then charged the suffix. The
+interleave was calibrated under the stock charging. This records the uncapped
+length per TB pc and charges a capped TB that much (ot_insn_charge_min).
+
+Result on tests/trig8-repro.sh (3 runs): the deterministic every-8th drop is
+gone, but drops remain SPORADIC ([2], [48, 77], []) where the build without
+0017 is clean on every run (7+). So this does not reproduce stock accounting
+exactly; see docs/PERF-NOTES.md.
+
+diff --git a/accel/tcg/cpu-exec.c b/accel/tcg/cpu-exec.c
+index 0e3520ab2c..a56cae4b8a 100644
+--- a/accel/tcg/cpu-exec.c
++++ b/accel/tcg/cpu-exec.c
+@@ -757,6 +757,7 @@ uint32_t ot_insn_budget;
+ void (*ot_insn_budget_hook)(void);
+ bool (*ot_insn_idle_hook)(void);
+ uint64_t ot_insn_idle_quanta;
++int ot_insn_charge_min;
+ static uint64_t ot_insn_whole_quanta;
+ 
+ uint64_t ot_insn_retired(void)
+diff --git a/accel/tcg/translate-all.c b/accel/tcg/translate-all.c
+index d981d82155..9e62615930 100644
+--- a/accel/tcg/translate-all.c
++++ b/accel/tcg/translate-all.c
+@@ -27,6 +27,7 @@
+ #include "exec/tb-flush.h"
+ #include "qemu/cacheinfo.h"
+ #include "qemu/target-info.h"
++#include "exec/ot-insn-budget.h"
+ #include "exec/log.h"
+ #include "exec/icount.h"
+ #include "accel/tcg/cpu-loop.h"
+@@ -260,6 +261,7 @@ static int setjmp_gen_code(CPUArchState *env, TranslationBlock *tb,
+ /* Called with mmap_lock held for user mode emulation.  */
+ #ifndef CONFIG_USER_ONLY
+ static int io_split_cap(vaddr pc);
++static int io_split_full_len(vaddr pc);
+ #endif
+ 
+ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
+@@ -283,9 +285,13 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
+     }
+ 
+     max_insns = s.cflags & CF_COUNT_MASK;
++    ot_insn_charge_min = 0;
+     if (max_insns == 0) {
+ #ifndef CONFIG_USER_ONLY
+         max_insns = io_split_cap(s.pc);
++        if (max_insns < TCG_MAX_INSNS) {
++            ot_insn_charge_min = io_split_full_len(s.pc);  /* see 0018 */
++        }
+ #else
+         max_insns = TCG_MAX_INSNS;
+ #endif
+@@ -588,6 +594,16 @@ void tb_check_watchpoint(CPUState *cpu, uintptr_t retaddr)
+  * that ~880k times a second. Only the vCPU thread touches this (one vCPU).
+  */
+ static GHashTable *io_split_caps;
++/* pc -> insn count of the TB before it was capped (patches/qemu/0018). */
++static GHashTable *io_split_full;
++
++static int io_split_full_len(vaddr pc)
++{
++    return io_split_full
++        ? GPOINTER_TO_INT(g_hash_table_lookup(io_split_full,
++                                              (gpointer)(uintptr_t)pc))
++        : 0;
++}
+ 
+ static int io_split_cap(vaddr pc)
+ {
+@@ -616,6 +632,13 @@ static void io_split_remember(TranslationBlock *tb, uintptr_t retaddr)
+     cap = tb->icount - left + 1;    /* insns up to and including the access */
+     if (!io_split_caps) {
+         io_split_caps = g_hash_table_new(NULL, NULL);
++        io_split_full = g_hash_table_new(NULL, NULL);
++    }
++    /* The uncapped length, which the stock split path charged: keep the
++     * largest seen, since a capped TB's own icount is already short. */
++    if ((int)tb->icount > io_split_full_len(tb->pc)) {
++        g_hash_table_insert(io_split_full, (gpointer)(uintptr_t)tb->pc,
++                            GINT_TO_POINTER((int)tb->icount));
+     }
+     if (cap < io_split_cap(tb->pc)) {
+         g_hash_table_insert(io_split_caps, (gpointer)(uintptr_t)tb->pc,
+diff --git a/accel/tcg/translator.c b/accel/tcg/translator.c
+index c1445a3be9..cc288ef2b4 100644
+--- a/accel/tcg/translator.c
++++ b/accel/tcg/translator.c
+@@ -215,7 +215,15 @@ void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
+ 
+     /* Emit code to exit the TB, as indicated by db->is_jmp.  */
+     ops->tb_stop(db, cpu);
+-    gen_tb_end(tb, cflags, icount_start_insn, db->num_insns);
++    /*
++     * A TB capped at an I/O split (patches/qemu/0017) is CHARGED to the
++     * Octatrack budget as the uncapped TB it replaces, so guest-visible
++     * timing is what the interleave was calibrated under; see
++     * ot_insn_charge_min in exec/ot-insn-budget.h.
++     */
++    gen_tb_end(tb, cflags, icount_start_insn,
++               ot_insn_budget && ot_insn_charge_min > db->num_insns
++               ? ot_insn_charge_min : db->num_insns);
+ 
+     /*
+      * Manage can_do_io for the translation block: set to false before
+diff --git a/include/exec/ot-insn-budget.h b/include/exec/ot-insn-budget.h
+index a3d3abb0b0..eaa4dc4f4e 100644
+--- a/include/exec/ot-insn-budget.h
++++ b/include/exec/ot-insn-budget.h
+@@ -69,4 +69,18 @@ uint64_t ot_insn_retired(void);
+ extern bool (*ot_insn_idle_hook)(void);
+ extern uint64_t ot_insn_idle_quanta;
+ 
++/*
++ * Budget charge floor for the TB being translated (0 = charge what it holds).
++ *
++ * ☠ The interleave is calibrated against the budget as the STOCK I/O split
++ * path charged it: a TB whose middle insn does MMIO was charged in full at
++ * entry, then the access ran in an uncounted 1-insn CF_NOIRQ TB, then the
++ * suffix TB was charged again. 0017 caps such TBs at the access (for speed)
++ * and so counted exactly — which moved the effective ColdFire:DSP ratio and
++ * made every 8th trig of a FLEX slice go silent (the same failure
++ * --interleave 1024 produces on stock accounting). tb_gen_code sets this to
++ * the uncapped TB's length for a capped TB, so the charge is unchanged.
++ */
++extern int ot_insn_charge_min;
++
+ #endif
