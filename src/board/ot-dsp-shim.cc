@@ -726,10 +726,55 @@ void shutdownAudio()
  * iteration, or only at a mailbox park, cost 22% and 12% more DSP work per
  * block for throughput that overlapped completely. The work is not duplicated,
  * only relocated onto the vCPU — attack the holds, not the drain.
+ *
+ * ☠ BUT "just step(64)" ON ONE CORE WAS A CORRECTNESS BUG, found later, and
+ * the peer now runs with it (stepPair) — for correctness, not throughput.
+ * These drains (and the rx pops and write stalls) advanced ONE core 64-256
+ * instructions while its peer stood still, which breaks the kCoreSlice
+ * lockstep the two cores' mailbox/shared-window handoff depends on. Measured
+ * on a FLEX single-cycle slice trigged on quarter notes (tests/trig8-repro.sh):
+ * a trig lands 2 frames later in its block each beat (1378.125 blocks/beat),
+ * and whichever phase coincided with a lone-core burst lost the note's
+ * sustain — ~0.3% of trigs at stock (3/672), and EVERY 8th trig at
+ * --interleave 1024 or with an exact-counting budget (qemu 0017). With
+ * stepPair: 0 drops in 1680+ beats across all three. The peer is skipped
+ * exactly where stepRound would not step it (frozen codec, codec parked at the
+ * block poll whose ESAI time belongs to the producer, core 1 idle at its
+ * mailbox), which keeps the cost to ~2% (PGO: 3420 -> ~3480 Mcycles/emu-s),
+ * not the 12-22% the unconditional variants measured.
  */
+/*
+ * Step core `c` by `n` instructions WITH its peer, in kCoreSlice alternation —
+ * the only way the two cores may advance relative to each other (see
+ * kCoreSlice). The peer is skipped where stepRound would hold it: not
+ * runnable, or the codec with an unread published word.
+ */
+void stepPair(ot::Core &c, unsigned n)
+{
+    for (unsigned k = 0; k < n; k += kCoreSlice) {
+        c.step(kCoreSlice);
+        for (auto &o : g_chip.core) {
+            if (&o == &c || !o.runnable()) {
+                continue;
+            }
+            if (&o == &codecCore()) {
+                /* Frozen with an unread word, or parked at the block-top
+                 * DSR2 poll — where only ESAI time moves it, and that time
+                 * belongs to the producer (stepRound fast-forwards it). */
+                if (o.hdi().hasTX() || ot::atBlockPoll(o.pc())) {
+                    continue;
+                }
+            } else if (ot::atMailboxWait(o.pc()) && !ot::g_icc.rxFull(1)) {
+                continue;               /* core 1 idle at its mailbox: nothing to hand over */
+            }
+            o.step(kCoreSlice);
+        }
+    }
+}
+
 ot::StepFn drainStep(ot::Core &c)
 {
-    return [&c] { c.step(64); };
+    return [&c] { stepPair(c, 64); };
 }
 
 } // namespace
@@ -847,7 +892,7 @@ void ot_dspcore_write(unsigned idx, uint32_t w)
     for (unsigned g = 0;
          g < 100000 && c.hdi().rxData().size() >= ot::kFifoDepth && !c.dead; g++) {
         s.writeStalls++;
-        c.step(256);
+        stepPair(c, 256);
     }
     TWord word = w & 0xFFFFFF;
     c.hdi().writeRX(&word, 1);
@@ -879,7 +924,7 @@ uint32_t ot_dspcore_rx_pop(unsigned idx)
          * request-paced supply, without a per-word thread round trip. */
         c.periphX.getDMA().trigger(DmaChannel::RequestSource::HostTransmitData);
         if (!c.hdi().hasTX()) {
-            c.step(64);
+            stepPair(c, 64);
         }
         if (!c.hdi().hasTX()) {
             s.popStale++;
@@ -955,12 +1000,7 @@ void ot_dspcore_write_burst(unsigned idx, uint32_t txh,
              g < 100000 && c.hdi().rxData().size() >= ot::kFifoDepth && !c.dead;
              g++) {
             s.writeStalls++;
-            c.step(256);
-            for (auto &o : g_chip.core) {
-                if (&o != &c) {
-                    o.step(64);
-                }
-            }
+            stepPair(c, 256);
         }
         c.hdi().writeRX(w, n);
         be += 2 * n;
@@ -979,7 +1019,7 @@ void ot_dspcore_read_burst(unsigned idx, uint8_t *be, unsigned halves)
         if (!c.hdi().hasTX() && c.hostTxArmed()) {
             c.periphX.getDMA().trigger(DmaChannel::RequestSource::HostTransmitData);
             if (!c.hdi().hasTX()) {
-                c.step(64);
+                stepPair(c, 64);
             }
         }
         if (c.hdi().hasTX()) {
