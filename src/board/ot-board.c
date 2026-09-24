@@ -901,6 +901,7 @@ static void ot_edma_irq_fire(OTEdma *s);
 static void ot_guest_progress(void)
 {
     ot_edma_gate_poll();
+    ot_ata_progress();
     ot_dsp_interleave();
 }
 

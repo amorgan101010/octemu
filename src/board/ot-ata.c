@@ -44,6 +44,8 @@
 #include "system/blockdev.h"
 #include "system/block-backend.h"
 #include "qom/object.h"
+#include "qemu/main-loop.h"
+#include "exec/ot-insn-budget.h"
 #include "ot-qemu.h"
 
 #define OT_ATA_SIZE         0x1000         /* a whole target page */
@@ -133,7 +135,20 @@
  * two: a 20 us delay on the write path lands inside the next request's
  * pre-IPL7 window and the ISR spins on DRQ at 0x4001551e forever.
  */
-#define OT_ATA_IRQ_LATENCY  10000          /* ns of virtual time */
+/* was: #define OT_ATA_IRQ_LATENCY 10000 (ns of virtual time) — see OT_ATA_IRQ_INSN */
+/*
+ * ☠ Now counted in GUEST instructions and delivered from ot_ata_progress(),
+ * for the same reason as the write path below (OT_WR_BACKSTOP_NS): a 10 us
+ * QEMU_CLOCK_VIRTUAL timer is host time, and on Linux each one cost a
+ * main-loop wakeup contending the BQL with an MMIO-heavy vCPU. Measured: a
+ * project load read 19735 sectors at ~400 us of GUEST time each (one audio
+ * block per sector, ~8 s to load), which also starves STATIC streaming.
+ * 10 us at the emulated ColdFire's ~132 insns/us is ~1320 instructions; the
+ * hook runs every `interleave` (512) retired, so delivery lands 1024-1535
+ * instructions after the command — 8-12 us of guest time, on any host.
+ */
+#define OT_ATA_IRQ_INSN     1024
+#define OT_ATA_BACKSTOP_NS  1000000        /* 1 ms: only if the guest idles */
 /*
  * WRITE completions are the hard case. The issue routine (0x40014848,
  * OS 1.40C) IPL-7-protects only the command write; the 512-byte push loop and
@@ -145,8 +160,26 @@
  * time exceeds the driver's bookkeeping".
  */
 #define OT_FW_SECTORS_LEFT  0x46c8c592     /* OS 1.40C ata_sectors_left */
-#define OT_WR_POLL_NS       2000
-#define OT_WR_POLL_MAX      25000          /* ~50 ms, then deliver anyway */
+/*
+ * ☠ POLLED ON GUEST PROGRESS, like the eDMA gate — not on a fast host timer.
+ * The original 2 us QEMU_CLOCK_VIRTUAL poll woke the main loop ~500k times a
+ * second, and every wakeup takes the BQL. The frame ISR touches MMIO every
+ * few instructions and each access needs that same lock; on Linux (unfair
+ * futex mutexes) the vCPU then lost nearly every handoff and ran ~0.5M
+ * guest insns/s instead of ~100M. The guest never got back to task level to
+ * decrement the counter, the 25000-poll cap fired after ~1 s of host time,
+ * and the forced INTRQ wedged the driver (a project save = ~8.6k writes, one
+ * of which always lost). Measured: in the stall window the DSP interleave
+ * hook fired ZERO times, i.e. < 512 guest instructions retired in 950 ms.
+ *
+ * So ot_ata_progress() checks the counter every `interleave` retired guest
+ * instructions on the vCPU thread (no BQL until it delivers), the timer is a
+ * slow backstop for a guest that stops retiring instructions, and the escape
+ * is counted in GUEST instructions, which a slow or contended host cannot
+ * burn through.
+ */
+#define OT_WR_BACKSTOP_NS   1000000        /* 1 ms: only if the guest idles */
+#define OT_WR_MAX_INSN      20000000ULL    /* ~150 ms of guest time, then deliver */
 
 /*
  * READ/IDENTIFY completions have the same shape of hazard, and NO delay closes
@@ -191,7 +224,6 @@
  */
 #define OT_FW_ATA_EVENT     0x46c8c598     /* OS 1.40C ata_completion_event  */
 #define OT_FW_EVENT_WAITER  4              /* event+4: the parked task, or 0 */
-#define OT_ATA_GATE_POLL_NS 2000
 /*
  * The escape is a SAFETY VALVE, not a tuning knob, and it must be generous
  * for the same reason the latency could never be tuned: with icount off,
@@ -211,7 +243,7 @@
  * is exactly how the 5 ms version reintroduced the hang at 0xEF. That is what
  * the per-command cap histogram in the exit report is for.
  */
-#define OT_ATA_GATE_MAX     25000          /* ~50 ms, then deliver anyway */
+#define OT_ATA_GATE_MAX_INSN 6600000ULL  /* ~50 ms of guest time, then deliver */
 
 typedef enum { XFER_NONE, XFER_TO_HOST, XFER_FROM_HOST } OTAtaXfer;
 
@@ -242,9 +274,12 @@ struct OTAta {
 
     bool intrq;                            /* drive INTRQ line */
     bool irq_level;                        /* CPU-visible (IER-gated) level */
-    QEMUTimer *irq_timer;
+    QEMUTimer *irq_timer;                  /* backstop only; see OT_ATA_IRQ_INSN */
+    bool irq_due;                          /* a completion INTRQ awaits delivery */
+    uint64_t irq_due_at;                   /* ot_insn_retired() it may land at */
+    uint64_t irq_seen;                     /* retired count at the last backstop */
     bool wr_pending;                       /* write completion awaiting delivery */
-    unsigned wr_polls;
+    uint64_t wr_at;                        /* ot_insn_retired() when it went pending */
     unsigned gate_polls;                   /* completion-gate polls this cmd */
     bool gate_armed;                       /* gate this command's completion  */
     QEMUTimer *wr_timer;
@@ -310,7 +345,8 @@ static void ot_ata_update_irq(OTAta *s)
 static void ot_ata_set_irq(OTAta *s, bool level)
 {
     if (!level) {
-        timer_del(s->irq_timer);           /* an ack cancels an unlanded raise */
+        s->irq_due = false;                /* an ack cancels an unlanded raise */
+        timer_del(s->irq_timer);
     }
     s->intrq = level;
     ot_ata_update_irq(s);
@@ -342,29 +378,52 @@ static bool ot_ata_requester_parked(void)
     return waiter != 0;
 }
 
-static void ot_ata_irq_fire(void *opaque)
+/*
+ * BQL held. Deliver a due completion once its latency has elapsed in guest
+ * instructions and, for gated commands, the requester is parked. `idle` is
+ * the backstop's verdict that the guest retired nothing for a whole backstop
+ * period: then nothing is racing us, so deliver. Returns whether it delivered.
+ */
+static bool ot_ata_irq_try(OTAta *s, bool idle)
 {
-    OTAta *s = opaque;
-
-    if (s->gate_armed && !ot_ata_requester_parked()) {
-        if (++s->gate_polls < OT_ATA_GATE_MAX) {
+    const uint64_t now = ot_insn_retired();
+    if (!s->irq_due) {
+        return true;
+    }
+    if (!idle && now < s->irq_due_at) {
+        return false;
+    }
+    if (!idle && s->gate_armed && !ot_ata_requester_parked()) {
+        if (now - s->irq_due_at < OT_ATA_GATE_MAX_INSN) {
+            s->gate_polls++;
             ot_ata_gate_polls++;
-            timer_mod(s->irq_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)
-                                    + OT_ATA_GATE_POLL_NS);
-            return;
+            return false;
         }
         /* Bounded escape: a request that never parks must degrade to the old
          * timing-based behaviour, not hang the device. */
         uint8_t cmd = 0;
-
         ot_ata_gate_caps++;
         address_space_read(&address_space_memory, OT_FW_ATA_EVENT - 5,
                            MEMTXATTRS_UNSPECIFIED, &cmd, 1);
         ot_ata_gate_cap_cmd[cmd]++;
     }
+    s->irq_due = false;
+    timer_del(s->irq_timer);
     ot_ata_set_irq(s, true);
+    return true;
 }
-
+/* The backstop timer, main loop, BQL held. */
+static void ot_ata_irq_fire(void *opaque)
+{
+    OTAta *s = opaque;
+    const uint64_t now = ot_insn_retired();
+    const bool idle = now == s->irq_seen;
+    s->irq_seen = now;
+    if (!ot_ata_irq_try(s, idle)) {
+        timer_mod(s->irq_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + OT_ATA_BACKSTOP_NS);
+    }
+}
 static void ot_ata_set_irq_later(OTAta *s)
 {
     s->gate_polls = 0;
@@ -373,36 +432,77 @@ static void ot_ata_set_irq_later(OTAta *s)
      * accounted for essentially all of the ~50k polls, so every other command
      * cleared the gate on its first check). The driver spins on DRQ for reads
      * instead of blocking on an event, so there is no waiter to wait for — and
-     * this is the audio-critical command, so it keeps the plain timer it has
+     * this is the audio-critical command, so it keeps the plain latency it has
      * always had. Every observed wedge was at IDENTIFY with sectors_r=0, before
      * any read is ever issued. */
+    s->irq_due = true;
+    s->irq_due_at = ot_insn_retired() + OT_ATA_IRQ_INSN;
+    s->irq_seen = ot_insn_retired();
     timer_mod(s->irq_timer,
-              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + OT_ATA_IRQ_LATENCY);
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + OT_ATA_BACKSTOP_NS);
 }
 
+/* Has the guest's own sector counter caught up with the device? RAM read,
+ * safe without the BQL. */
+static bool ot_ata_wr_caught_up(OTAta *s, uint8_t *left)
+{
+    address_space_read(&address_space_memory, OT_FW_SECTORS_LEFT,
+                       MEMTXATTRS_UNSPECIFIED, left, 1);
+    return *left == (s->xfer_left & 0xff);
+}
+/* BQL held. Deliver if the counter caught up or the escape expired; returns
+ * whether it delivered. */
+static bool ot_ata_wr_try(OTAta *s)
+{
+    uint8_t left;
+    if (!s->wr_pending) {
+        return true;
+    }
+    if (!ot_ata_wr_caught_up(s, &left)) {
+        if (ot_insn_retired() - s->wr_at < OT_WR_MAX_INSN) {
+            return false;
+        }
+        warn_report("octatrack-ata: write INTRQ forced after %llu guest "
+                    "instructions (guest=%u dev=%u)",
+                    (unsigned long long)OT_WR_MAX_INSN, left, s->xfer_left);
+    }
+    s->wr_pending = false;
+    timer_del(s->wr_timer);
+    ot_ata_set_irq(s, true);
+    return true;
+}
+/* The backstop timer, main loop, BQL held. */
 static void ot_ata_wr_fire(void *opaque)
 {
     OTAta *s = opaque;
-    uint8_t left;
-
-    if (!s->wr_pending) {
-        return;
-    }
-    address_space_read(&address_space_memory, OT_FW_SECTORS_LEFT,
-                       MEMTXATTRS_UNSPECIFIED, &left, 1);
-    if (left != (s->xfer_left & 0xff) && ++s->wr_polls < OT_WR_POLL_MAX) {
+    if (!ot_ata_wr_try(s)) {
         timer_mod(s->wr_timer,
-                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + OT_WR_POLL_NS);
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + OT_WR_BACKSTOP_NS);
+    }
+}
+/* Guest progress, vCPU thread, no BQL held (see ot_guest_progress). */
+void ot_ata_progress(void)
+{
+    OTAta *s = ot_ata_singleton;
+    uint8_t left;
+    if (!s) {
         return;
     }
-    if (s->wr_polls >= OT_WR_POLL_MAX) {
-        warn_report("octatrack-ata: write INTRQ forced after poll cap "
-                    "(guest=%u dev=%u)", left, s->xfer_left);
+    /* Cheap unlocked pre-checks; both paths re-check under the BQL. */
+    if (qatomic_read(&s->irq_due) &&
+        ot_insn_retired() >= qatomic_read(&s->irq_due_at)) {
+        bql_lock();
+        ot_ata_irq_try(s, false);
+        bql_unlock();
     }
-    s->wr_pending = false;
-    ot_ata_set_irq(s, true);
+    if (qatomic_read(&s->wr_pending) &&
+        (ot_ata_wr_caught_up(s, &left) ||
+         ot_insn_retired() - s->wr_at >= OT_WR_MAX_INSN)) {
+        bql_lock();
+        ot_ata_wr_try(s);
+        bql_unlock();
+    }
 }
-
 /* ATA strings: space padded, first character in the high byte. */
 static void ot_ata_str(uint16_t *id, int word, int words, const char *str)
 {
@@ -656,7 +756,7 @@ static void ot_ata_data_write(OTAta *s, uint64_t val, unsigned size)
     }
     ot_ata_set_irq(s, false);          /* data block complete negates INTRQ */
     s->wr_pending = true;              /* raise once the guest's counter has */
-    s->wr_polls = 0;                   /* caught up; see OT_FW_SECTORS_LEFT  */
+    s->wr_at = ot_insn_retired();      /* caught up; see OT_FW_SECTORS_LEFT  */
     ot_ata_wr_fire(s);
 }
 

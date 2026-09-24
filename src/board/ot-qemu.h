@@ -109,6 +109,9 @@ void ot_dsp_interleave(void);
  * counter. Polled on guest progress; see OT_FW_EDMA_STATE_CTR in ot-board.c
  * for why that is exact and why it has no escape. */
 void ot_edma_gate_poll(void);
+/* Deliver a held ATA write completion once the guest's sector counter has
+ * caught up. Polled on guest progress; see OT_WR_BACKSTOP_NS in ot-ata.c. */
+void ot_ata_progress(void);
 /* The firmware's per-block DSP transfer state counter (0x46104d3e). */
 uint32_t ot_edma_state_ctr(void);
 /* Retired guest instructions, and the stamp of the first arm of the block in
