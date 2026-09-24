@@ -93,11 +93,49 @@ skipped where stepRound wouldn't step it. 0 drops in 1680+ beats (512, 1024,
 and with 0017). ~2% cost. **Please apply it on macOS too** (it's in
 `src/board/ot-dsp-shim.cc`, portable) and run `tests/trig8-repro.sh`.
 
-**0017 still stays out**, for a different reason: with 0017, loading the
-fixture project takes >11 s of guest time on LOADING FILES vs ~2 s without
-(same 19735 sectors read; the guest sits in `fs_copy_file` longer). Measured
-on 0017 alone and 0017+stepPair; not yet understood. The 0017 build also
-failed `make fixtures` stage 2 because of it (FUNC lands during LOADING).
+**0017 still stays out**, for a different reason: it makes project loading
+~3x slower. Investigated (diagnostics below):
+
+| (fixture project, uninstrumented builds) | load, guest | load, wall | speed during load |
+|---|---|---|---|
+| stock baseline | 3.0 s | 10.8 s | 0.28x |
+| current `linux` (stepPair, no 0017) | 4.0 s | 8.2 s | 0.49x |
+| stepPair + 0017 | 12.2 s | 15.7 s | 0.77x |
+
+- **Card reads themselves are NOT slowed.** The load is ~18.7k single-sector
+  READs. Time inside read commands: 0.13 s (no 0017) vs 0.54 s (0017) —
+  ~0.08 block per sector with 0017, vs the ~0.125 sectors/block a STATIC
+  stream needs. test-emu-audio (a STATIC machine) passed 3/3 on 0017 builds.
+- **The loss is between reads**: gaps total 4.1 s vs 10.0 s; the CPU is mostly
+  IDLE in them (guest-time PC profile: idle_loop 11.5% -> 29.5% of the load
+  window). What ends each idle run: without 0017, the ATA interrupt 83% /
+  frame ISR 17%; with 0017, ATA 49% / **frame ISR 51%** (~14k extra idle runs
+  that last until the next audio block's frame ISR). So the loader's handoff
+  with the RTOS misses the current block and waits for the next one far more
+  often under 0017. Which handoff is not yet identified.
+- Ruled out: tick rate (PIT0 ~ 100 per WALL second in both builds; 138 vs 133
+  per guest second in these runs, so not the differentiator).
+- Also found (independent of 0017): **the firmware's timers run on host wall
+  clock** — PIT0 (the 10 ms preemption tick) and DTIM1 (the 60 Hz system
+  tick) are ptimers on QEMU_CLOCK_VIRTUAL, while audio and CPU run on guest
+  time. Firmware behaviour around ticks therefore varies with host speed
+  (e.g. 207 vs 138 ticks per guest second at 0.28x vs 0.49x). Next on the
+  Linux side: drive these timers from guest (DSP frame) time; then finish the
+  0017 loader root cause on that deterministic base; then a STATIC stress test.
+
+### Diagnostics added (all opt-in, off by default)
+
+- `OCTA_ATA_LOG=1` — every READ command and completion, with retired-guest-
+  instruction and audio-block stamps. `scripts/diag/ata-reads.py LOG`.
+- `OCTA_PCHIST=FILE` — samples guest PC/SR/block every budget quantum (512
+  retired insns), i.e. uniform in GUEST time, unlike perf. Unbiased where
+  gdbstub halting is not. `scripts/diag/pc-profile.py FILE ATALOG` profiles
+  the project-load window by firmware symbol and IPL.
+- `OCTA_CAPTURE_BLOCKS=N` — longer `--capture-dsp` window;
+  `scripts/diag/capture-diff.py A B` aligns two captures and diffs the
+  CPU->DSP arm streams.
+- `scripts/diag/trig-phase.py WAV START_BLOCK` — per-beat onset frame and its
+  phase within the 16-frame block (how the every-8th pattern was found).
 
 ### History (the investigation that led here)
 

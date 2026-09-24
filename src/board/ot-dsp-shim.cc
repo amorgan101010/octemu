@@ -1050,6 +1050,11 @@ int ot_dspcore_hreq(void)
     return g_shim[0].c->hdi().hasTX() ? 1 : 0;
 }
 
+uint64_t ot_dsp_blocks(void)   /* DIAG: blocks shipped, for ATA logging */
+{
+    return g_blocks;
+}
+
 void ot_dsp_stats(char *buf, size_t len)
 {
     const uint64_t nb = g_blocks ? g_blocks : 1;

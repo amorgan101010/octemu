@@ -112,6 +112,7 @@ void ot_edma_gate_poll(void);
 /* Deliver a held ATA write completion once the guest's sector counter has
  * caught up. Polled on guest progress; see OT_WR_BACKSTOP_NS in ot-ata.c. */
 void ot_ata_progress(void);
+uint64_t ot_dsp_blocks(void);
 /* The firmware's per-block DSP transfer state counter (0x46104d3e). */
 uint32_t ot_edma_state_ctr(void);
 /* Retired guest instructions, and the stamp of the first arm of the block in

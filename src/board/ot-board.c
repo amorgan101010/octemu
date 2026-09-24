@@ -925,8 +925,51 @@ static bool ot_guest_idle(void)
  * held one quantum longer than it needs is guest time lost. Then the DSP,
  * which is where most of the quantum goes.
  */
+/* DIAG: OCTA_PCHIST=FILE samples the guest PC and IPL every quantum (so the
+ * samples are uniform in GUEST instructions, not host time) with the block
+ * count, and writes them as (pc, sr, block) u32 triples at exit. */
+static uint32_t *ot_pcs;
+static size_t ot_pcs_n, ot_pcs_cap;
+static char *ot_pcs_path;
+
+static void ot_pcs_dump(void)
+{
+    FILE *f = fopen(ot_pcs_path, "wb");
+
+    if (f) {
+        fwrite(ot_pcs, sizeof(uint32_t) * 3, ot_pcs_n, f);
+        fclose(f);
+    }
+}
+
+static void ot_pcs_sample(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *p = getenv("OCTA_PCHIST");
+
+        on = p != NULL;
+        if (on) {
+            ot_pcs_path = g_strdup(p);
+            ot_pcs_cap = 32u << 20;
+            ot_pcs = g_malloc(ot_pcs_cap * sizeof(uint32_t) * 3);
+            atexit(ot_pcs_dump);
+        }
+    }
+    if (on && ot_pcs_n < ot_pcs_cap) {
+        CPUM68KState *env = cpu_env(first_cpu);
+        uint32_t *e = &ot_pcs[ot_pcs_n++ * 3];
+
+        e[0] = env->pc;
+        e[1] = env->sr;
+        e[2] = (uint32_t)ot_dsp_blocks();
+    }
+}
+
 static void ot_guest_progress(void)
 {
+    ot_pcs_sample();
     ot_edma_gate_poll();
     ot_ata_progress();
     ot_dsp_interleave();

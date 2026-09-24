@@ -287,6 +287,17 @@ struct OTAta {
 
 static OTAta *ot_ata_singleton;
 
+/* DIAG: OCTA_ATA_LOG=1 logs read commands and completions with retired
+ * guest-instruction stamps. */
+static bool ot_ata_log(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        on = getenv("OCTA_ATA_LOG") != NULL;
+    }
+    return on;
+}
+
 /* Structural counters. Sector counts and MMIO access counts are fixed by the
  * firmware's PIO loop, so they say the same thing under any host load. */
 static uint64_t ot_ata_reads, ot_ata_writes, ot_ata_mmio, ot_ata_reread;
@@ -630,6 +641,11 @@ static void ot_ata_command(OTAta *s, uint8_t cmd)
 
     switch (cmd) {
     case CMD_READ_SECTORS:
+        if (ot_ata_log()) {                                    /* DIAG */
+            fprintf(stderr, "ATARD cmd lba=%u n=%u ret=%llu blk=%llu\n", lba, count,
+                    (unsigned long long)ot_insn_retired(),
+                    (unsigned long long)ot_dsp_blocks());
+        }
         s->xfer_lba = lba;
         s->xfer_left = count;
         ot_ata_present_read_sector(s, false);
@@ -719,6 +735,11 @@ static uint64_t ot_ata_data_read(OTAta *s, unsigned size)
         } else {
             s->xfer = XFER_NONE;
             s->status = ST_IDLE;
+            if (ot_ata_log()) {                                /* DIAG */
+                fprintf(stderr, "ATARD done ret=%llu blk=%llu\n",
+                        (unsigned long long)ot_insn_retired(),
+                        (unsigned long long)ot_dsp_blocks());
+            }
         }
     }
     return val;
