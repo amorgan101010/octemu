@@ -503,3 +503,21 @@ taps, `make fixtures` walks succeed.
   `-Wno-profile-instr-{unprofiled,out-of-date,missing}`.
 - Overwriting a signed binary in place gets it SIGKILLed on macOS: `rm` before
   `cp` when swapping QEMU builds (moot with OCTEMU_QEMU).
+
+### macOS on the merged `linux` branch (9217770 + mouse fix)
+
+Built with clang LTO + PGO retrained on this tree; every check rerun:
+
+- **ATA on guest progress: saving works on macOS.** `make fixtures` from
+  scratch (project creation, sample load, trig walk, all saved to the card)
+  succeeds with no "write INTRQ forced" / poll-cap messages.
+- `make test-emac` 18/18, `tests/emac-diff.py` bit-exact vs the pre-work
+  build, `make test-emu-audio` 3/3 (440.0 Hz, no dropouts), keys-72: 72/72
+  trig taps first time (the usual one post-boot PLAY re-tap).
+- Paced: 98.5-98.9% of real time over 60 s *including boot* — i.e. pinned at
+  the pace. Unthrottled vs my previous best build (same patches, older tree):
+  127.6-134.7% vs 127.7-129.5%.
+- Also on this branch: `frontend: map mouse clicks correctly on Retina with
+  sdl2-compat` — Homebrew's sdl2 is now sdl2-compat, which reports mouse
+  events in pixels on Retina, so every click landed at 2x (not perf, but
+  every current Mac build needs it).
