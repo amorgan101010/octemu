@@ -67,10 +67,18 @@ parse want | while read -r kind cmd formula why; do
     report "$kind" "$cmd" "$formula" "$why"
 done
 
-[ "$(uname)" = Darwin ] || cat <<MSG
-  note: this is $(uname). The emulator is macOS-only for two reasons — the USB
-        DISK MODE host mount and --midi (CoreMIDI), both in src/platform/.
+case $(uname) in
+Darwin) ;;
+Linux)  cat <<MSG
+  note: Linux uses src/platform/linux.c — DISK MODE via udisksctl, --midi via
+        the ALSA sequencer (needs alsa-lib). Package names above are Homebrew's.
 MSG
+        ;;
+*)      cat <<MSG
+  note: this is $(uname). Only macOS and Linux have a src/platform/ port.
+MSG
+        ;;
+esac
 
 if [ "$ok" = 1 ]; then
     echo "ok: everything required is here"

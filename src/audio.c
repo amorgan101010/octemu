@@ -25,6 +25,7 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <SDL.h>

@@ -71,7 +71,7 @@ index 84bc68fa4e..ddd7449e57 100644
 +    dsp56300_bld / 'source' / 'dsp56kEmu' / 'libdsp56kEmu.a',
 +    dsp56300_bld / 'source' / 'dsp56kBase' / 'libdsp56kBase.a',
 +    dsp56300_bld / 'source' / 'asmjit' / 'libasmjit.a',
-+    '-lc++',
++    host_os == 'darwin' ? ['-lc++'] : [dsp56300_bld / 'source' / 'vtuneSdk' / 'libvtuneSdk.a', '-lstdc++', '-ldl'],
 +  ])
 +
 +m68k_ss.add(when: 'CONFIG_MCF5208',

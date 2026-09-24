@@ -57,7 +57,7 @@ cd "$DST"
 # QEMU_EXTRA_CONFIGURE passes extra options through, e.g. -Db_lto=true (LTO is
 # meson's builtin b_lto; there is no --enable-lto in this QEMU).
 OCTATRACK_DSP56300=$DSPSRC OCTATRACK_DSP56300_BUILD=$DSPBLD \
-    ./configure --target-list=m68k-softmmu --enable-plugins \
+    ./configure --target-list=m68k-softmmu --enable-plugins --disable-werror \
         ${QEMU_EXTRA_CONFIGURE:-} >/dev/null
 ninja -C build qemu-system-m68k -j "$JOBS"
 

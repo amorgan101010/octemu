@@ -117,7 +117,7 @@ NVRAM=$FX/nvram.bin
 
 mkdir -p "$FX"
 scripts/mkcard.sh "$CARD" 64 >/dev/null
-dd if=/dev/zero of="$NVRAM" bs=1m count=1 2>/dev/null
+dd if=/dev/zero of="$NVRAM" bs=1024 count=1024 2>/dev/null
 
 python3 - "$FX/sine440.wav" <<'EOF'
 import math, struct, sys, wave

@@ -45,6 +45,9 @@ USBAUDIO = $(call OSNAME,usb-audio)
 DSPA := $(DSP)/build/source/dsp56kEmu/libdsp56kEmu.a \
         $(DSP)/build/source/dsp56kBase/libdsp56kBase.a \
         $(DSP)/build/source/asmjit/libasmjit.a
+ifeq ($(UNAME),Linux)
+DSPA += $(DSP)/build/source/vtuneSdk/libvtuneSdk.a
+endif
 
 # -Wall -Wextra on both programs, and both are clean under it — keep them
 # that way. ☠ -isystem, not -I, for the vendored DSP core: those headers
@@ -131,14 +134,15 @@ out/panel/panel.bin: assets/panel/rasterize.py assets/panel/octatrack.svg \
 # The DSP chip is shared with the QEMU shim, so this program exercises the
 # same code the Octatrack runs — and answers a DSP question in four seconds.
 octdsp: src/dsp-main.cc src/board/ot-dsp56k.cc src/board/ot-dsp56k.h src/wav.h $(DSPA)
-	c++ $(CXXFLAGS) -o $@ src/dsp-main.cc src/board/ot-dsp56k.cc $(DSPA) -lpthread
+	c++ $(CXXFLAGS) -o $@ src/dsp-main.cc src/board/ot-dsp56k.cc $(DSPA) -lpthread $(if $(filter Linux,$(UNAME)),-ldl)
 
 # src/platform/darwin.c is the macOS port: app activation, the USB DISK MODE
 # host mount and the --midi bridge.
 octemu: $(EMUSRC) src/emu.h src/wav.h src/platform/platform.h \
                     src/board/ot-audio-shm.h src/board/ot-panel-wire.h
 	cc $(CFLAGS) $(SDL_CFLAGS) -o $@ $(EMUSRC) $(SDL_LIBS) -lpthread -lm \
-	    $(if $(filter Darwin,$(UNAME)),-lobjc -framework CoreMIDI -framework CoreFoundation)
+	    $(if $(filter Darwin,$(UNAME)),-lobjc -framework CoreMIDI -framework CoreFoundation)\
+	    $(if $(filter Linux,$(UNAME)),$(shell pkg-config --libs alsa))
 
 # ---------------------------------------------------------------- fixtures --
 # The card fixtures every audio and USB test starts from, built once and then
