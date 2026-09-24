@@ -693,7 +693,19 @@ static struct {
  * this is 250 — the cheapest setting the evidence supports. Do not tune it
  * against a single run.
  */
-static const unsigned kAim = RATE / 4;
+static unsigned kAim = RATE / 4;       /* --audio-cushion overrides it */
+/* SDL device buffer, frames: --audio-buffer overrides it. */
+static unsigned g_dev_samples = 512;
+
+void audio_set_buffers(unsigned dev_samples, unsigned cushion_ms)
+{
+    if (dev_samples) {
+        g_dev_samples = dev_samples;
+    }
+    if (cushion_ms) {
+        kAim = (unsigned)((uint64_t)RATE * cushion_ms / 1000);
+    }
+}
 /* Anchor creep per callback (~23 s time constant at 512 frames) and the two
  * level-trim gains. */
 static const double kAnchorCreep = 0.0005, kTrimP = 0.02, kTrimQ = 0.10;
@@ -1017,10 +1029,14 @@ bool audio_start(const char *sock_path, const InGen in[INS],
         want.freq = RATE;
         want.format = AUDIO_S16SYS;
         want.channels = 2;
-        want.samples = 512;
+        want.samples = (Uint16)(g_dev_samples > 32768 ? 32768 : g_dev_samples);
         want.callback = monitor_cb;
         g.dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
         if (g.dev) {
+            fprintf(stderr, "octemu: live monitor: device buffer %u frames "
+                    "(asked %u, %.1f ms), cushion %u frames (%.0f ms), driver %s\n",
+                    have.samples, want.samples, 1000.0 * have.samples / have.freq,
+                    kAim, 1000.0 * kAim / RATE, SDL_GetCurrentAudioDriver());
             SDL_PauseAudioDevice(g.dev, 0);
         }
     }

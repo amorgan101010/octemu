@@ -129,6 +129,9 @@ static const char *k_usage =
     "                instead of at real time, because capacity cannot be read\n"
     "                through a throttle. Flat out, the guest stops being\n"
     "                something a person can play\n"
+    "  --audio-buffer N  live monitor SDL device buffer, frames (default 512)\n"
+    "  --audio-cushion MS live monitor cushion, ms (default 250); larger\n"
+    "                rides out emulator stalls at the cost of latency\n"
     "  --interleave N a CALIBRATION knob, not a tuning one: guest instructions\n"
     "                per DSP slice, the ratio the ColdFire and the DSP run at\n"
     "                (default 512). Values cannot be interpolated — measure any\n"
@@ -266,7 +269,8 @@ static void usb_poll(void)
     fclose(f);
 }
 
-#define QEMU_BIN "vendor/qemu/build/qemu-system-m68k"
+/* OCTEMU_QEMU overrides it, for A/B-ing optimized builds (tools/bench.sh). */
+#define QEMU_BIN (getenv("OCTEMU_QEMU") ? getenv("OCTEMU_QEMU") : "vendor/qemu/build/qemu-system-m68k")
 
 static void spawn_qemu(const char *panel_sock, const char *audio_sock)
 {
@@ -452,6 +456,8 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--midi"))        g.midi = true;
         else if (!strcmp(a, "--no-hints"))   { g.no_hints = true; }
         else if (!strcmp(a, "--interleave"))  { ARG(); g.interleave = atoi(val); }
+        else if (!strcmp(a, "--audio-buffer")) { ARG(); audio_set_buffers((unsigned)atoi(val), 0); }
+        else if (!strcmp(a, "--audio-cushion")) { ARG(); audio_set_buffers(0, (unsigned)atoi(val)); }
         else if (!strncmp(a, "--in-", 5) && strlen(a) == 6 &&
                  a[5] >= 'a' && a[5] <= 'd') {
             const int idx = a[5] - 'a';

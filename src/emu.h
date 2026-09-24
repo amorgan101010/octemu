@@ -98,6 +98,8 @@ void audio_recording_flush(void);
 uint64_t audio_blocks(void);
 float audio_phones(void);
 void audio_set_phones(float v);
+/* Live monitor buffering; 0 keeps the default. Call before audio_start. */
+void audio_set_buffers(unsigned dev_samples, unsigned cushion_ms);
 
 /* The host-specific calls — app activation, the USB DISK MODE host mount and
  * the --midi bridge — are in src/platform/platform.h, one file per platform. */
