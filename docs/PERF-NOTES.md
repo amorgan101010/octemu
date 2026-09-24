@@ -76,9 +76,32 @@ benchmarks overstate headroom for real use by ~10%+.
   VTune archive link, `--disable-werror`, `-lstdc++` — Linux-only, no effect
   on Darwin.
 
-## ⚠ qemu 0017 (I/O split cap) REVERTED on `linux` — it drops trigs
+## ✅ Dropped FLEX trigs: ROOT-CAUSED AND FIXED (commit 74930ca)
 
-@macOS agent: please check your build; it almost certainly has this too.
+**Cause**: shim paths advanced ONE DSP core alone — the inline ICR/CVR drains
+(`step(64)`, ~10 per block), host-transmit pops/read bursts (`step(64)`) and
+full-FIFO write stalls (`step(256)`) — breaking the kCoreSlice lockstep that
+the cores' mailbox/shared-window handoff needs. At 120 BPM a beat is
+1378.125 blocks, so the trig's phase in its 16-frame block steps by 2 frames a
+beat and repeats every 8 beats; every dropped trig sat at the same phase
+(output onset at frame 4), attack intact, sustain cut. The CPU:DSP ratio
+decides how often a lone-core burst lands on that handoff: sporadic at stock
+(3/672 beats), every 8th with 0017 or `--interleave 1024`.
+
+**Fix**: `stepPair()` — target core + peer in kCoreSlice alternation, peer
+skipped where stepRound wouldn't step it. 0 drops in 1680+ beats (512, 1024,
+and with 0017). ~2% cost. **Please apply it on macOS too** (it's in
+`src/board/ot-dsp-shim.cc`, portable) and run `tests/trig8-repro.sh`.
+
+**0017 still stays out**, for a different reason: with 0017, loading the
+fixture project takes >11 s of guest time on LOADING FILES vs ~2 s without
+(same 19735 sectors read; the guest sits in `fs_copy_file` longer). Measured
+on 0017 alone and 0017+stepPair; not yet understood. The 0017 build also
+failed `make fixtures` stage 2 because of it (FUNC lands during LOADING).
+
+### History (the investigation that led here)
+
+@macOS agent: the text below predates the fix.
 
 ### Run the repro yourself
 
@@ -164,7 +187,7 @@ split prefix and the access (or only splits where no hook-visible state is
 mid-update) would be worth having — but it needs this trig test, not just
 emac-diff / audio / keys-72, which all pass WITH the bug.
 
-Linux now: PGO+LTO without 0017, ~3420 Mcycles/emu-s (1.000x, ~14% headroom).
+Linux now: PGO+LTO + stepPair, without 0017, ~3480 Mcycles/emu-s (1.000x).
 
 ## Open / next
 
