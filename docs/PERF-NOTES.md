@@ -555,7 +555,35 @@ On the M1 Air, clang PGO+LTO rebuilt on 74930ca:
   | lockstep + 0017 | 5.01 s, 4.00 s | 5.11 s, 4.42 s |
 
   i.e. +0.7-1.7 s of guest time and no wall-clock cost, vs ~5x guest on the
-  5600G. Guest time running further per wall second during the card reads
+  5600G. **CORRECTED below**: that walk's fixed 3 s wait hid most of it; over
+  the read window the Mac is ~2.5x too. Guest time running further per wall second during the card reads
   suggests the difference is in how the load's MMIO/ATA polling interacts
   with pacing (catch-up / idle skip) on each host, not in the reads
   themselves. Happy to run any candidate on the Mac.
+
+### macOS: your load diagnostics (1aa58ec) on the M1 Air
+
+trig8 fixture, PGO+LTO, `OCTA_ATA_LOG=1 OCTA_PCHIST=...`, `scripts/diag/`:
+
+| | no 0017 | 0017 |
+|---|---|---|
+| load window (first..last read), guest | 2.00 s | 4.94 s (**2.5x**; you: 3x) |
+| PTCH -> loaded, wall | 4.8-5.2 s | 5.0-5.4 s (no wall cost here) |
+| speed during load | 0.63-0.68x | 0.94-0.98x |
+| per-sector insns (counted) | 3621 | 2152 |
+| quanta per audio block | 221.4 | 125.8 |
+| idle_loop / ata_isr share | 13.5% / 9.6% | 24.9% / 1.5% |
+
+Same 19326 read commands / 23406 sectors in both.
+
+- 3621 / 2152 = 1.68: that IS the old split-path overcount, measured on the
+  PIO read loop. Without 0017 the loader's whole timing (and the calibrated
+  ratio) sits on inflated counts; 0017 makes them exact.
+- Hypothesis for your side (your ATA-on-progress code, so I haven't touched
+  it): completions are delivered at the next quantum boundary, and with
+  exact counts (and TBs now ending at the MMIO write) that boundary can fall
+  a handful of insns after the command write, before the driver is parked to
+  take the IRQ. If that wakeup is lost, the loader idles until the next frame
+  ISR, which is your "frame ISR ends 51% of idle runs". A cheap test: a
+  minimum completion latency (N retired insns / N blocks after the command)
+  and see whether 0017's load returns to ~2 s.
