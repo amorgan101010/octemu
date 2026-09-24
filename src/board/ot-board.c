@@ -471,12 +471,13 @@ uint64_t ot_timer_fire_count[8];
 void ot_timer_stats(char *buf, size_t len)
 {
     snprintf(buf, len, "timers pit0=%llu dtim0=%llu dtim1=%llu dtim2=%llu "
-             "dtim3=%llu",
+             "dtim3=%llu | idle_skip quanta=%llu",
              (unsigned long long)ot_timer_fire_count[4],
              (unsigned long long)ot_timer_fire_count[0],
              (unsigned long long)ot_timer_fire_count[1],
              (unsigned long long)ot_timer_fire_count[2],
-             (unsigned long long)ot_timer_fire_count[3]);
+             (unsigned long long)ot_timer_fire_count[3],
+             (unsigned long long)ot_insn_idle_quanta);
 }
 
 /* -------------------------------------------------------------------- PIT -- */
@@ -891,6 +892,25 @@ uint32_t ot_edma_state_ctr(void)
 }
 
 static void ot_edma_irq_fire(OTEdma *s);
+
+/*
+ * The idle skip (patches/qemu/0014). OS 1.40C's idle task is a self-chained
+ * `bra .` at idle_loop (re/coldfire.syms): with interrupts unmasked there,
+ * nothing changes until one arrives. Measured, it was 29% of all host cycles
+ * during playback: each pass executes 512 branches to earn the DSP its next
+ * slice. cpu-exec calls this at a quantum boundary; true lets it credit the
+ * quanta and step the DSP directly until an interrupt is pending. The guest
+ * instruction count, and so the DSP:ColdFire ratio, is unchanged.
+ * OCTA_NO_IDLE_SKIP=1 turns it off (A/B).
+ */
+#define OT_FW_IDLE_LOOP 0x4001fc9c
+
+static bool ot_guest_idle(void)
+{
+    CPUM68KState *env = cpu_env(first_cpu);
+
+    return env->pc == OT_FW_IDLE_LOOP && !(env->sr & SR_I);
+}
 
 /*
  * Everything that happens on GUEST PROGRESS, in order. The eDMA gate first:
@@ -2552,6 +2572,9 @@ static void octatrack_init(MachineState *machine)
     ot_dsp_hold_set(om->hold);
     /* Before any TB is translated: the decrementer lives in the TB preamble. */
     ot_insn_budget_enable(om->interleave, ot_guest_progress);
+    if (!getenv("OCTA_NO_IDLE_SKIP")) {
+        ot_insn_idle_hook = ot_guest_idle;
+    }
     if (om->capture) {
         ot_capture_wire = g_str_has_suffix(om->capture, ".wire");
         ot_capture_fp = fopen(om->capture, "w");

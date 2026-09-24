@@ -1,0 +1,77 @@
+accel/tcg: idle skip for the Octatrack guest-instruction budget
+
+When the guest sits in a loop that only waits for an interrupt, executing it
+burns host time purely to count instructions for the budget hook. Let the
+machine say so (ot_insn_idle_hook); at a quantum boundary cpu-exec then
+credits whole quanta and calls the budget hook directly, up to
+OT_INSN_IDLE_MAX_QUANTA at a time, until an interrupt or exit request is
+pending. The retired-instruction count, and so the ratio to the other chip,
+is exactly what executing the loop would have produced.
+
+On the Octatrack the idle task is a self-chained `bra .`, and it was 29% of
+all host cycles during playback.
+
+diff --git a/accel/tcg/cpu-exec.c b/accel/tcg/cpu-exec.c
+index e0c92ef9c8..0e3520ab2c 100644
+--- a/accel/tcg/cpu-exec.c
++++ b/accel/tcg/cpu-exec.c
+@@ -755,6 +755,8 @@ static inline bool cpu_handle_exception(CPUState *cpu, int *ret)
+ 
+ uint32_t ot_insn_budget;
+ void (*ot_insn_budget_hook)(void);
++bool (*ot_insn_idle_hook)(void);
++uint64_t ot_insn_idle_quanta;
+ static uint64_t ot_insn_whole_quanta;
+ 
+ uint64_t ot_insn_retired(void)
+@@ -940,6 +942,29 @@ static inline void cpu_loop_exec_tb(CPUState *cpu, TranslationBlock *tb,
+         if (ot_insn_budget_hook) {
+             ot_insn_budget_hook();
+         }
++        /*
++         * Idle skip. When the guest sits in a loop that does nothing but wait
++         * for an interrupt (the machine says so through ot_insn_idle_hook),
++         * executing it only burns host time to count instructions. Credit
++         * whole quanta and run the hook directly instead, until anything
++         * wants the CPU: an interrupt (raised by the hook itself or by
++         * another thread) or an exit request. The retired-instruction count,
++         * and so the ratio to the other chip, is exactly what executing the
++         * loop would have produced.
++         */
++        if (ot_insn_budget_hook && ot_insn_idle_hook) {
++            for (unsigned i = 0; i < OT_INSN_IDLE_MAX_QUANTA; i++) {
++                if (qatomic_read(&cpu->interrupt_request) ||
++                    qatomic_read(&cpu->exit_request) ||
++                    qatomic_read(&cpu->neg.icount_decr.u16.high) ||
++                    !ot_insn_idle_hook()) {
++                    break;
++                }
++                ot_insn_whole_quanta += ot_insn_budget;
++                ot_insn_idle_quanta++;
++                ot_insn_budget_hook();
++            }
++        }
+         return;
+     }
+     assert(icount_enabled());
+diff --git a/include/exec/ot-insn-budget.h b/include/exec/ot-insn-budget.h
+index 44c366f31e..a3d3abb0b0 100644
+--- a/include/exec/ot-insn-budget.h
++++ b/include/exec/ot-insn-budget.h
+@@ -57,4 +57,16 @@ void ot_insn_budget_enable(uint32_t quantum, void (*hook)(void));
+  */
+ uint64_t ot_insn_retired(void);
+ 
++/*
++ * Idle skip. Optional: when set and it returns true at a quantum boundary,
++ * the guest is in a loop that only waits for an interrupt, so cpu-exec credits
++ * whole quanta and calls the budget hook directly (up to
++ * OT_INSN_IDLE_MAX_QUANTA at a time) until an interrupt or exit request is
++ * pending. Called on the vCPU thread with no BQL held, CPU state consistent.
++ * ot_insn_idle_quanta counts the quanta skipped.
++ */
++#define OT_INSN_IDLE_MAX_QUANTA 4096
++extern bool (*ot_insn_idle_hook)(void);
++extern uint64_t ot_insn_idle_quanta;
++
+ #endif
