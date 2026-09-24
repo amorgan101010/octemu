@@ -1,0 +1,5 @@
+# Benchmark load: let the guest settle, press PLAY, then run until --timeout.
+# Used by scripts/ab-wall.sh.
+{"wait_guest_ms":15000}
+{"tap":"PLAY"}
+{"wait_guest_ms":3600000,"timeout_ms":3600000}

@@ -1,0 +1,52 @@
+hdi08: bulk writeRX, and fix the batched ring push it needs
+
+writeRX pushed one word at a time: a semaphore wait, a push and a semaphore
+notify per word, three atomic read-modify-writes each. The Octatrack's eDMA
+delivers every minor loop through it, so it was ~3% of the vCPU thread.
+waitNotFull() is a no-op on a locking ring, so one batched push is
+equivalent: the batched wait blocks exactly when the per-word waits would.
+
+The batched emplace_back(count) it uses had never been called, and was
+broken: the write count only advances after the loop, so every entry of the
+batch was written to the same slot. Each entry now gets its own offset.
+
+Measured unthrottled, interleaved: ahead in 4 of 5 rounds, ~+3 points of
+real time. test-emu-audio 3/3 clean.
+
+--- a/source/dsp56kBase/ringbuffer.h
++++ b/source/dsp56kBase/ringbuffer.h
+@@ -91,8 +91,11 @@
+ 
+ 			m_writeSem.wait(static_cast<uint32_t>(_count));
+ 
++			// The write count only advances after the loop, so each entry needs
++			// its own offset: without "+ i" the whole batch lands in one slot.
++			const auto w = loadWriteRlx();
+ 			for (size_t i=0; i<_count; ++i)
+-				_fillEntry(i, m_data[wrapCounter(loadWriteRlx())]);
++				_fillEntry(i, m_data[wrapCounter(w + i)]);
+ 
+ 			// usage need to be incremented AFTER data has been written, otherwise, reader thread would read incomplete data
+ 			incWriteCount(_count);
+--- a/source/dsp56kEmu/hdi08.cpp
++++ b/source/dsp56kEmu/hdi08.cpp
+@@ -152,13 +152,13 @@
+ 
+ 	void HDI08::writeRX(const TWord* _data, const size_t _count)
+ 	{
+-		for (size_t i = 0; i < _count; ++i)
++		// One semaphore round trip for the whole batch instead of three atomics
++		// per word: waitNotFull() is a no-op on a locking ring, and the batched
++		// wait blocks exactly when the per-word waits would have.
++		m_dataRX.emplace_back(_count, [&](const size_t _i, TWord& _dst)
+ 		{
+-			m_dataRX.waitNotFull();
+-			const auto d = _data[i] & 0x00ffffff;
+-//			LOG("Write RX: " << HEX(d));
+-			m_dataRX.push_back(d);
+-		}
++			_dst = _data[_i] & 0x00ffffff;
++		});
+ 		m_periph.setDelayCycles(0);
+ 	}
+ 

@@ -78,3 +78,81 @@ Effective clock under load is ~3.9 GHz here, so ~3600 is only ~8% headroom.
   intermittently). Not investigated yet.
 - Not yet measured: QEMU `-O3`, and dropping meson's `-D_GLIBCXX_ASSERTIONS`
   (debug buildtype) from the two C++ shim files.
+
+## macOS (M1 MacBook Air, 8 GB, fanless; macOS 27, Apple clang)
+
+Measured as wall-clock fraction of real time, 60 s headless, boot + PLAY, on a
+read-only card. Every comparison is INTERLEAVED (`scripts/ab-wall.sh`): this
+Air thermal-throttles ~10% after a minute, so back-to-back runs of one build
+then the other are worthless. `BENCH_ARGS=--unthrottled` gives raw capacity,
+which separates small wins better than the paced rate near the ceiling.
+
+| build (cumulative) | paced | unthrottled |
+|---|---|---|
+| stock | ~70% | — |
+| + clang LTO | ~71% | — |
+| + clang PGO | ~76% | — |
+| + inline fractional EMAC (qemu 0015) | ~81% | — |
+| + catch-up pacing (same idea as "repays lateness") | ~92% | ~95% |
+| + JIT execute-toggle cache (qemu 0016) | ~93% | ~97% |
+| + HDI08 bulk writeRX (dsp 0012) | — | ~100% |
+| + I/O split cap (qemu 0017) | ~99% | ~116% |
+| + your idle skip (qemu 0014) | holds real time | **~129%** |
+
+Idle skip on top of everything, 3 interleaved rounds unthrottled: 114.1 /
+116.3 / 116.0% -> 126.3 / 129.6 / 129.6%. Audio 3/3, keys-72 clean.
+
+### What changed, and whether it touches Linux
+
+- **Inline fractional EMAC** (`patches/qemu/0015`) — portable. ~99% of the
+  firmware's MAC traffic is fractional (FI=1): 67% OMC, 12% OMC+RT, 11%
+  non-saturating, 8% SU. MACSR's mode bits are already in the TB flags, so
+  macmulf, mac_accum + mac_set_flags (fused) and get_macf are emitted inline
+  per mode; integer modes keep the helpers. This is the "EMAC helpers 6%"
+  line above. Checked bit-exact against the helper build by
+  `tests/emac-diff.py --ref OLD_QEMU` (random MAC sequences in all 16 modes,
+  latched PAV, extremes, MAC-with-load, every accumulator read in-mode and
+  raw); it catches a planted tie-rounding bug and a planted sticky-PAV bug.
+- **I/O split cap** (`patches/qemu/0017`) — portable, and probably the
+  "TCG tb lookup/restore ~8%" line above. MMIO that is not the last insn of
+  its TB goes through cpu_io_recompile (longjmp, host-pc tree lookup, unwind,
+  a 1-insn TB) and the original TB stays cached, so polling loops paid it on
+  every pass: **~880k/s** here. Now the split point is remembered per TB pc,
+  the TB is invalidated and retranslated ending at the access. IRQ behaviour
+  is unchanged (nothing between prefix and access in either version). Side
+  effect: the 0012 budget now counts exactly (the split path used to charge
+  the whole TB for the prefix, the suffix again, and not the access).
+  core `stalls` (host writes into a full RX FIFO, drained by stepping the
+  DSP) rose 4 -> 44 per minute; nothing dropped.
+- **HDI08 bulk writeRX** (`patches/dsp56300/0012`) — portable. One batched
+  ring push per call instead of three atomics per word. **Also fixes a latent
+  dsp56300 bug**: `RingBuffer::emplace_back(count, fn)` wrote every entry of
+  the batch into ONE slot (the write count only advances after the loop).
+  Nothing called it before. Worth checking whether the MD/MM fork has it too.
+- **JIT execute-toggle cache** (`patches/qemu/0016`) — macOS only
+  (`__APPLE__`). cpu_tb_exec calls pthread_jit_write_protect_np on every entry;
+  with the budget returning to the loop constantly it was ~4% of the vCPU.
+  asmjit toggles the same per-thread state but always ends in execute, so
+  only QEMU's write path clears the cache.
+- **Catch-up pacing**: found independently here: the vCPU was ASLEEP 18% of
+  the time at 81% of real time. Your "repays lateness" (150 ms) covers it;
+  100 ms measured best here (20 ms 89%, 100 ms 91.6%, 500 ms 90.9%).
+- **Tools**: `tests/walks/keys-72.jsonl` (72 verified trig taps while
+  playing) + `src/script.c` now prints `re-tap (key lost)` whenever a verified
+  tap has to be redone — a direct measure of key delivery, which the
+  throttle comment says must be re-tested whenever pacing loosens.
+  `scripts/ab-wall.sh` is the interleaved wall-clock A/B (uses OCTEMU_QEMU).
+
+Verified on every step: `make test-emac` 18/18, `tests/emac-diff.py` bit-exact,
+`make test-emu-audio` 3/3 (440.0 Hz, no dropouts), keys-72 with no lost trig
+taps, `make fixtures` walks succeed.
+
+### Notes for the Linux side
+
+- clang PGO: `-fprofile-generate=DIR` / `llvm-profdata merge` /
+  `-fprofile-use=FILE` on both QEMU (`--extra-cflags`/`--extra-ldflags`, each
+  flag its own option: QEMU_EXTRA_CONFIGURE is word-split) and dsp56300
+  (`CMAKE_{C,CXX}_FLAGS`). QEMU's git build is -Werror, so add
+  `-Wno-profile-instr-{unprofiled,out-of-date,missing}`.
+- Overwriting a signed binary in place gets it SIGKILLed on macOS: `rm` before
+  `cp` when swapping QEMU builds (moot with OCTEMU_QEMU).
