@@ -679,6 +679,10 @@ static struct {
     /* wall-clock rate measurement and the filtered level error */
     double t_mark, err_f, t0, slo, shi, t_log;
     uint64_t w_mark, starved_log;
+    /* Rebuffering after a starve: silent until a full cushion is back. */
+    bool rebuf, win_starved;
+    double gain;                      /* click-free fade, 0..1 */
+    uint64_t rebufs;
 } g_mon;
 
 /*
@@ -772,9 +776,25 @@ static void monitor_cb(void *unused, Uint8 *stream, int len)
          * throttle holds it there and unthrottled overshoots it. */
         g_mon.rate = 1.0;
         g_mon.ratio = g_mon.rate;
+        g_mon.gain = 1.0;
     }
 
     avail = (double)w - g_mon.rd;
+    /*
+     * ☠ A STARVE REBUFFERS, it does not bend the pitch. The anchor below used
+     * to follow the producer down through boot and every project load (both
+     * run at ~0.5x real time) to its 0.5 floor, and it took seconds to climb
+     * back once the load ended — so the first bars after a load, exactly when
+     * the user presses PLAY, played ~700 cents flat and swooped up to pitch
+     * (measured, OCTEMU_MON_LOG: rate 0.61 at t=14, 1.0 at t=16). Now running
+     * dry fades to silence and waits for a whole cushion, like any jitter
+     * buffer, and the anchor does not learn from a window that starved. Boot
+     * and loads stutter (they are near-silent); playback is at pitch.
+     */
+    if (g_mon.rebuf && avail >= kAim) {
+        g_mon.rebuf = false;
+        g_mon.t_mark = 0.0;                 /* a fresh rate window */
+    }
     (void)inst;
     /*
      * ☠ THE RATIO IS THE PITCH, so it must move slowly and little.
@@ -805,7 +825,7 @@ static void monitor_cb(void *unused, Uint8 *stream, int len)
             const double meas = (double)(w - g_mon.w_mark)
                               / ((now - g_mon.t_mark) * RATE);
 
-            if (meas > 0.05 && meas < 2.0) {
+            if (meas > 0.05 && meas < 2.0 && !g_mon.win_starved) {
                 /* ~3 s normally; ~0.5 s while the cushion is in its
                  * emergency band, so a slow boot's low reading does not keep
                  * playback slow until the ring overfills and laps. */
@@ -815,16 +835,27 @@ static void monitor_cb(void *unused, Uint8 *stream, int len)
                  * dive; holding the last sample briefly is far less audible.
                  * The floor keeps a slow host playable without letting a
                  * stall drag the pitch through the floor. */
+                /* Back UP fast too: the pace is real time, so a low anchor is
+                 * only ever a leftover. The 0.97 floor (~50 cents) still lets a
+                 * host a few percent short play smoothly; anything slower
+                 * rebuffers instead of dragging the pitch down with it. */
+                /* ...and never ABOVE real time: after a stall the pace repays
+                 * its debt in a burst, and following that up (measured: to
+                 * 1.05, 85 cents sharp, decaying over ~8 s after every load)
+                 * is the same warble inverted. An overfull cushion is the
+                 * trim's job. */
+                const double m = meas > 1.0 ? 1.0 : meas;
                 const double e = (avail - kAim) / (double)kAim;
-                const double tau = e > 0.9 ? 0.5 : 3.0;
+                const double tau = (e > 0.9 || m > g_mon.rate) ? 0.5 : 3.0;
                 const double a = (now - g_mon.t_mark) / tau;
 
-                g_mon.rate += (a > 1.0 ? 1.0 : a) * (meas - g_mon.rate);
-                if (g_mon.rate < 0.5)  g_mon.rate = 0.5;
-                if (g_mon.rate > 1.05) g_mon.rate = 1.05;
+                g_mon.rate += (a > 1.0 ? 1.0 : a) * (m - g_mon.rate);
+                if (g_mon.rate < 0.97) g_mon.rate = 0.97;
+                if (g_mon.rate > 1.0)  g_mon.rate = 1.0;
             }
             g_mon.t_mark = now;
             g_mon.w_mark = w;
+            g_mon.win_starved = false;
         }
         err = (avail - kAim) / (double)kAim;
         g_mon.err_f += (cb / 2.0 > 1.0 ? 1.0 : cb / 2.0) * (err - g_mon.err_f);
@@ -843,9 +874,10 @@ static void monitor_cb(void *unused, Uint8 *stream, int len)
         if (g_mon.ratio > g_mon.hi) g_mon.hi = g_mon.ratio;
         if (g_mon_log && now - g_mon.t_log >= 1.0) {   /* OCTEMU_MON_LOG=1 */
             fprintf(stderr, "octemu: mon t=%.0f rate=%.4f ratio=%.4f avail=%.0fms "
-                    "starved+%llu\n", now - g_mon.t0, g_mon.rate, g_mon.ratio,
-                    1000.0 * avail / RATE,
-                    (unsigned long long)(g_mon.starved - g_mon.starved_log));
+                    "starved+%llu rebufs=%llu%s\n", now - g_mon.t0, g_mon.rate,
+                    g_mon.ratio, 1000.0 * avail / RATE,
+                    (unsigned long long)(g_mon.starved - g_mon.starved_log),
+                    (unsigned long long)g_mon.rebufs, g_mon.rebuf ? " (rebuf)" : "");
             g_mon.t_log = now;
             g_mon.starved_log = g_mon.starved;
         }
@@ -861,11 +893,20 @@ static void monitor_cb(void *unused, Uint8 *stream, int len)
         const uint64_t idx = (uint64_t)g_mon.rd;
         double fr, vl, vr;
 
-        if (idx + 1 >= w) {                   /* starved: hold, don't click */
+        if (g_mon.rebuf || idx + 1 >= w) {    /* starved: fade out, rebuffer */
+            if (!g_mon.rebuf) {
+                g_mon.rebuf = true;
+                g_mon.rebufs++;
+            }
             g_mon.starved++;
-            o[2 * i] = (int16_t)(g.phones * g_mon.last_l);
-            o[2 * i + 1] = (int16_t)(g.phones * g_mon.last_r);
+            g_mon.win_starved = true;
+            g_mon.gain = g_mon.gain > 1.0 / 64 ? g_mon.gain - 1.0 / 64 : 0.0;
+            o[2 * i] = (int16_t)(g.phones * g_mon.gain * g_mon.last_l);
+            o[2 * i + 1] = (int16_t)(g.phones * g_mon.gain * g_mon.last_r);
             continue;
+        }
+        if (g_mon.gain < 1.0) {                /* and fade back in */
+            g_mon.gain = g_mon.gain < 1.0 - 1.0 / 64 ? g_mon.gain + 1.0 / 64 : 1.0;
         }
         fr = g_mon.rd - (double)idx;
         vl = g_mon.l[idx % MON_CAP]
@@ -878,8 +919,8 @@ static void monitor_cb(void *unused, Uint8 *stream, int len)
          * 24-bit MAIN slots down), so phones is the ONLY gain allowed here.
          * Dividing by 256 as well leaves the monitor 48 dB down — silent —
          * while every recording stays perfect. */
-        o[2 * i] = (int16_t)(g.phones * vl);
-        o[2 * i + 1] = (int16_t)(g.phones * vr);
+        o[2 * i] = (int16_t)(g.phones * g_mon.gain * vl);
+        o[2 * i + 1] = (int16_t)(g.phones * g_mon.gain * vr);
         g_mon.rd += g_mon.ratio;
     }
     /* The producer may have lapped us while we were behind; never read stale. */
@@ -1061,10 +1102,11 @@ done:
     fputc('\n', stderr);
     if (g_mon.primed) {
         fprintf(stderr, "octemu: monitor ratio %.4f-%.4f "
-                "(%.0f cents) anchor %.4f starved %llu frames\n",
+                "(%.0f cents) anchor %.4f starved %llu frames rebuffers %llu\n",
                 g_mon.lo, g_mon.hi,
                 1200.0 * log2(g_mon.hi / (g_mon.lo > 0 ? g_mon.lo : 1)),
-                g_mon.rate, (unsigned long long)g_mon.starved);
+                g_mon.rate, (unsigned long long)g_mon.starved,
+                (unsigned long long)g_mon.rebufs);
         if (g_mon.slo > 0) {
             fprintf(stderr, "octemu: monitor after 5 s: ratio %.4f-%.4f (%.1f cents)\n",
                     g_mon.slo, g_mon.shi, 1200.0 * log2(g_mon.shi / g_mon.slo));

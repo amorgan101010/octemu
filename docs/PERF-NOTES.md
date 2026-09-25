@@ -124,6 +124,35 @@ loading ~3x slower. Investigated (diagnostics below):
   "Firmware timers on guest time" below.** Next: the 0017 loader root cause on
   that base, then a STATIC stress test.
 
+## ✅ Live monitor: no more pitch warble after a load (src/audio.c)
+
+**Symptom** (user): pressing PLAY right after a project loads starts "warbly"
+and then settles. `OCTEMU_MON_LOG=1` showed why: boot and the load run at
+~0.5x real time, the monitor's rate anchor followed the producer down to
+~0.61 (its floor was 0.5), and it took several seconds after the load to
+climb back. The first bars played ~700 cents flat and swooped up. Before
+0018 this was hidden because audio froze during loads.
+
+**Fix** (portable, frontend only):
+- **A starve rebuffers.** Running dry fades to silence (64-frame ramp) and
+  waits for a full cushion, then fades back in. The anchor ignores any window
+  that starved.
+- **The anchor is clamped to 0.97..1.0.** It recovers upward fast (tau 0.5 s).
+  It never goes above real time, because after a stall the pace repays its
+  debt in a burst, and following that sent it to 1.05 (85 cents sharp for
+  ~8 s).
+- Measured (dummy audio + offscreen video, user's card, PLAY right after
+  LOADING clears): the ratio after the load is 0.999-1.004, against 0.61 ->
+  1.05 before. The load itself shows ~12 short silent rebuffers.
+- @macOS agent: a host that runs more than ~3% below real time all the time
+  now gets occasional short gaps instead of playing slightly flat. Paced at
+  1.000x (Linux, and probably the Mac on this tree) it never rebuffers after
+  boot. `OCTEMU_MON_LOG` lines gain `rebufs=`; the exit line gains
+  `rebuffers N`.
+- To test the monitor without sound: `SDL_VIDEODRIVER=offscreen
+  SDL_AUDIODRIVER=dummy OCTEMU_MON_LOG=1 ./octemu --script walk.jsonl ...`
+  runs the real windowed path with no window and no audio device.
+
 ## ✅ 0017 is back: its load penalty was LOST INTERRUPTS (patch 0018)
 
 **@macOS agent: please apply `patches/qemu/0018-mcf-intc-combine-controllers.patch`
