@@ -72,7 +72,7 @@ EMUSRC := src/main.c src/panel.c src/ocr.c src/audio.c src/skin.c src/script.c \
 # programs and the rasterized panel.
 all: octdsp octemu panel card
 
-.PHONY: all setup doctor os qemu panel panel-svg card fixtures demo-gif \
+.PHONY: all setup doctor os qemu panel panel-svg card fixtures demo-gif gates \
         receive-gif \
         test test-audio \
         test-dsp test-dsp-metro test-emac test-emu test-emu-audio \
@@ -374,6 +374,11 @@ out/sig8/card.img out/sig8/nvram.bin: octemu $(QEMU) out/fx/card.img \
 # the one no single run can be trusted from.
 test: test-dsp test-dsp-metro test-emac test-emu
 	@echo 'PASSED: the fast set. make test-audio runs the TRIG9 walk.'
+
+# Everything a build must pass before it ships, on either host: scripts/gates.sh
+# (DSP, EMAC, audio, sequencer trigs, key delivery, save + reload). ~20 min.
+gates: octemu octdsp $(QEMU) $(IMG) out/fx2/card.img
+	scripts/gates.sh $(GATES_LABEL)
 
 test-audio: test-emu-audio
 	@echo "PASSED: the audio walk — ☠ re-run at least 3x before believing a result."
