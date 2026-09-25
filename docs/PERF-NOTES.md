@@ -610,3 +610,27 @@ M1 Air, PGO+LTO retrained, interleaved against the previous build (1aa58ec):
   ticks. Faithful ticks remove that bonus. Loads are now identical run to
   run and match across hosts, which makes the loader's tick/HREQ waiting
   (your "DSP freezes during project load") the one thing to fix everywhere.
+
+### macOS: 0017 + 0018 (INTC) and everything since, validated
+
+M1 Air, clang PGO+LTO on 7a01779:
+
+- **`scripts/gates.sh` / `make gates`** (new, please use it on Linux too):
+  13/13 PASS: test-dsp, -metro, -emu, test-emac, emac-diff, audio x3,
+  trig8 x3, keys-72, save-reload. A known-bad build (0017 without the
+  lockstep + INTC fixes) fails trig8 at once (then hangs in save-reload until
+  its 2400 s walk timeout).
+- 0017 + 0018 vs the guest-timer build, interleaved: **paced 99.3% on every
+  run** (was 97.1-97.8%, boot included); **unthrottled 151-157%** (was
+  129-136%). Load 6.95 s guest (~7 s like the real unit), 6.9 s wall.
+- **Your startup-warble fix (2cc0f12):** PLAY right after LOADING, ratio
+  0.9968, no starving, 0 rebuffers. BUT don't trust SDL's **dummy** audio
+  driver for pitch on macOS: measured, it consumes **44763 frames/s = 1.0150x**
+  (standalone SDL test, 20 s). The monitor then drains its cushion to ~50 ms
+  and sits on the 0.97 clamp: that's the fake device running fast, not the
+  monitor. Real CoreAudio runs at its true rate.
+- **Fixed: SIGBUS with `SDL_VIDEODRIVER=offscreen` on macOS** (your silent-test
+  recipe). skin_render ignored SDL_LockTexture's result; the lock fails there
+  and the LCD expansion wrote through an uninitialised pointer (skin.c:804).
+  Now a failed lock falls back to SDL_UpdateTexture (commit c6a7704).
+  Offscreen + dummy now boots, loads and plays.
