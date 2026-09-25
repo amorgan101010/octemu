@@ -139,9 +139,11 @@ on `ot_gclk_ns()` in `ot-board.c`:
   boot).
 - **Instruction-time fallback** (6.327 ns/insn = 112 quanta per block,
   measured at 1.00x) before the codec's first frame, and whenever it has
-  clocked no frame for 32768 retired insns. That threshold comes from a
-  histogram of frameless gaps: normal holds are all <= 2^13 insns, 2^14-2^15
-  are ~empty, then a tail up to 2^27 (see below).
+  clocked no frame for 131072 (2^17) retired insns. That threshold comes from
+  a histogram of frameless gaps: normal holds are all <= 2^13 insns, a
+  cluster of ~30/s at 2^16, then a sparse tail up to 2^27 (see below).
+  `fallback=` in the exit stats is therefore large after boot/load and small
+  in play: that's expected, not a bug.
 - The PIT is QEMU's ptimer LEGACY semantics reproduced on this clock (the
   immediate trigger on a zero count, the PCSR-before-PMR re-arm). Deadlines
   are checked in `ot_guest_progress` against one cached minimum, BQL taken
@@ -156,14 +158,18 @@ Results (5600G, PGO+LTO, no 0017):
 
 | | guest timers | host timers (same binary) | previous build |
 |---|---|---|---|
-| PIT0 per 50k blocks (silicon ~1830) | 1955 | 2526 | 2730 |
+| PIT0 per block, whole run (silicon 0.0363) | 0.0388 | 0.0505 | 0.0541 |
 | trig8 project load, guest | 4.36, 4.39 s | 5.51, 5.68 s | 5.71, 4.47 s |
 | trig8 project load, wall | 10.5, 10.3 s | 12.4, 12.5 s | 14.3, 10.4 s |
 | user's card: load guest / wall | 4.6 / 9.6 s | 4.2 / 9.8 s | |
 | boot to PTCH, wall (user's card) | 5.2 s | 3.7 s | |
 
 Throughput unchanged (bench.sh, median of 3: 3467 vs 3480 Mcycles/emu-s,
-both 1.000x). Gates pass (test-dsp, -metro, -emu, -emu-audio); trig8 batch 0 drops in 672
+both 1.000x). PIT0 per block runs 7% above silicon over a whole run because the DSP freezes
+during boot/load, and during those freezes time runs on while blocks don't.
+(13b4f0a shipped a 32768 threshold; 2^17 cuts steady-play fallback from 27 to
+21 per 10 s and total fallback entries from 806 to 217, load unchanged.)
+Gates pass (test-dsp, -metro, -emu, -emu-audio); trig8 batch 0 drops in 672
 beats (8/8 valid). Loads become consistent run to run; delivery hatch 0.
 **Cost: boot is ~1.5 s slower in wall time**. Boot runs at ~0.55x, and the
 firmware's timed boot waits now wait in emulated time, as on silicon.

@@ -494,9 +494,15 @@ uint64_t ot_timer_fire_count[8];
  * whenever it has clocked none for OT_GCLK_STALL_INSN, time falls back to
  * retired instructions at the measured real-time rate, so a guest waiting on
  * a timer can never wait on a DSP that is waiting on the guest. `fallback=`
- * in the exit report counts those quanta after the first frame; it should be
- * ~0, and `max_quiet=` is the longest frameless gap seen, which is what the
- * stall threshold has to clear.
+ * in the exit report counts those quanta after the first frame. It is LARGE
+ * after boot and a project load (the DSP freezes for up to ~1 s of guest
+ * time while the loader ignores it; silicon's ESAI would keep clocking) and
+ * small in steady play (a few >0.8 ms delivery holds). `max_quiet=` is the
+ * longest frameless gap seen.
+ *
+ * The threshold is from a histogram of frameless gaps (OCTA_GCLK_LOG): the
+ * normal holds are all <= 2^13 insns, a cluster of ~30/s sits at 2^16, then
+ * a sparse tail runs to 2^27. 2^17 clears both groups of model holds.
  *
  * Deadlines are checked on guest progress (ot_guest_progress) against one
  * cached minimum, unlocked; the BQL is taken only to fire. OCTA_HOST_TIMERS=1
@@ -505,7 +511,7 @@ uint64_t ot_timer_fire_count[8];
 #define OT_GCLK_FRAME_HZ        44100
 /* 112 quanta of 512 per 362.8 us block, measured at 1.00x: 6.327 ns/insn. */
 #define OT_GCLK_PS_PER_INSN     6327ULL
-#define OT_GCLK_STALL_INSN      32768ULL
+#define OT_GCLK_STALL_INSN      131072ULL
 #define OT_GCLK_NEVER           UINT64_MAX
 
 static bool ot_gclk_host;
