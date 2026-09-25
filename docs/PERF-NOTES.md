@@ -124,6 +124,19 @@ loading ~3x slower. Investigated (diagnostics below):
   "Firmware timers on guest time" below.** Next: the 0017 loader root cause on
   that base, then a STATIC stress test.
 
+## ✅ `in_underruns` was counting the frontend's startup, not underruns
+
+User sessions showed `in_underruns` of 13911 and 647 where headless runs show
+16-112. Logging each underrun with context showed that every one happened
+before the frontend attached (`client=-1`, blocks 0-1 headless): the shim
+shipped blocks without pushing any input, so the DSP read an empty input
+ring. A windowed session attaches later, after SDL/PipeWire startup (~0.3 s
+= ~870 blocks in the 13911 case). It was harmless, since the inputs are
+silence then, but it made the counter meaningless. Now `ot-dsp-shim.cc`
+primes one zero input block at init and feeds silence while no frontend is
+attached, so the count is 0 on the user's card and only real underruns
+register. Gates pass; trig8 0/672.
+
 ## ✅ Live monitor: no more pitch warble after a load (src/audio.c)
 
 **Symptom** (user): pressing PLAY right after a project loads starts "warbly"
@@ -220,8 +233,14 @@ also logs `irq` / `ack` / `data0` stamps):
   load and was discarded.
 - User's own card with 0017 + 0018: load 7.0 s guest / 10.8 s wall, boot
   to PTCH 4.5 s wall, fallback=0. Paced bench 1.000x at ~3170 Mcycles/emu-s.
-- Open: PIT0 (vector 171) is taken ~6x per tick; either the firmware acks
-  it late or the model re-asserts it. Not yet investigated.
+- ~~Open: PIT0 (vector 171) is taken ~6x per tick.~~ **Resolved: correct
+  firmware behaviour, not a model bug.** Traced with INTC1's registers
+  dumped at every take of vector 171 (steady play, 2000 takes): each real
+  tick is taken exactly once (563 fires, 563 takes with IPR bit 43 set), and
+  the rest (~2 per tick) have INTFRC bit 43 set, meaning the RTOS forces its
+  own tick source to request a reschedule. No take is stale. The ISR writes
+  PCSR (clearing PIF) on every entry, forced or not, hence ~6.5 PCSR writes
+  per fire.
 
 ## ✅ Firmware timers on guest time
 

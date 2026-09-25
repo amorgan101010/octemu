@@ -608,7 +608,9 @@ void closeBlock()
                 g_clientFd = -1;
             }
             int32_t z[kFrames][kIns] = {};
-            g_in.pushBlock(z);              /* one block of zero input primes it */
+            if (!g_in.count) {
+                g_in.pushBlock(z);          /* one block of zero input primes it */
+            }
             g_deadline = std::chrono::steady_clock::now();
         }
     }
@@ -628,7 +630,14 @@ void closeBlock()
         }
         g_blocks++;
         if (!g_shm || g_client < 0) {
-            continue;                       /* nobody listening; keep the pace */
+            /* Nobody listening: keep the pace, and feed the DSP silence so
+             * in_underruns only ever counts real ones. It used to count every
+             * input frame read before the frontend attached — measured
+             * 13911 in a windowed session whose PipeWire startup took ~0.3 s,
+             * against 16-112 headless, all at blocks 0-1 or pre-connect. */
+            int32_t z[kFrames][kIns] = {};
+            g_in.pushBlock(z);
+            continue;
         }
         /* Backstop only: the frontend has stopped, not merely hiccuped. */
         while (g_running && g_shm->consumer_alive && g_client >= 0 &&
@@ -804,6 +813,10 @@ void ot_dspcore_init(const char *audio_path, int throttle, uint32_t interleave,
         g_chip.core[i].init(i,
             [](int32_t *in) { g_in.popFrame(in); },
             [](const int32_t *slots) { g_out.push(slots); });
+    }
+    {
+        int32_t z[kFrames][kIns] = {};
+        g_in.pushBlock(z);                  /* input for the very first block */
     }
     audioListen(audio_path);
     g_blkT0 = g_deadline = std::chrono::steady_clock::now();
