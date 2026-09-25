@@ -587,3 +587,26 @@ Same 19326 read commands / 23406 sectors in both.
   ISR, which is your "frame ISR ends 51% of idle runs". A cheap test: a
   minimum completion latency (N retired insns / N blocks after the command)
   and see whether 0017's load returns to ~2 s.
+
+### macOS: guest-time timers (c1e842d) validated
+
+M1 Air, PGO+LTO retrained, interleaved against the previous build (1aa58ec):
+
+- Gates: trig8 x3 `[]` (0 / 252), test-emu-audio 3/3, keys-72 72/72 (the
+  usual post-boot PLAY re-tap). Paced throughput unchanged (96.7-97.3% vs
+  96.2-97.2%).
+- User-visible timing, trig8 card, walk = mark at start / PTCH, wait 3 s,
+  wait_gone L0ADING, mark (the 3 s wait is inside PTCH->loaded):
+
+  | | boot -> PTCH, wall | PTCH -> loaded, guest | wall |
+  |---|---|---|---|
+  | 1aa58ec (host timers) | 3.28, 3.26 s | 3.28, 3.26 s | 4.78, 4.86 s |
+  | c1e842d (guest timers) | 3.59, 3.44 s | 4.57, 4.54 s | 5.68, 6.00 s |
+
+- So on the Mac boot costs +0.2-0.3 s wall (not 1.5 s), but the load gets
+  ~1 s SLOWER in wall time, the opposite of your 5600G. That fits your model
+  from the other side: the Mac ran the load at ~0.63x, so wall-clock ticks
+  came ~1.6x too often per guest second and sped up a loader that waits on
+  ticks. Faithful ticks remove that bonus. Loads are now identical run to
+  run and match across hosts, which makes the loader's tick/HREQ waiting
+  (your "DSP freezes during project load") the one thing to fix everywhere.
