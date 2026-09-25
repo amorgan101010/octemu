@@ -8,7 +8,8 @@ BLOCKS=$(python3 -c "print(int($SECS*44100/16))")
 [ -f out/fx2/card.img ] || { echo "needs out/fx2 (make fixtures)" >&2; exit 1; }
 [ -n "${QEMU:-}" ] && export OCTEMU_QEMU="$QEMU"
 W=$(mktemp -d "$here/out/bench.XXXX"); trap 'rm -rf "$W"' EXIT
-printf '%s\n' '{"wait_text":"PTCH","timeout_ms":180000}' '{"wait_guest_ms":4000}' \
+printf '%s\n' '{"wait_text":"PTCH","timeout_ms":180000}' '{"wait_guest_ms":500}' \
+  '{"wait_gone":"L0ADING","timeout_ms":300000}' '{"wait_guest_ms":4000}' \
   '{"tap":"PLAY"}' '{"wait_guest_ms":2000}' '{"mark":"a"}' \
   "{\"wait_blocks\":$BLOCKS}" '{"mark":"b"}' > "$W/walk.jsonl"
 for r in $(seq 1 "$RUNS"); do

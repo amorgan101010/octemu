@@ -494,15 +494,17 @@ uint64_t ot_timer_fire_count[8];
  * whenever it has clocked none for OT_GCLK_STALL_INSN, time falls back to
  * retired instructions at the measured real-time rate, so a guest waiting on
  * a timer can never wait on a DSP that is waiting on the guest. `fallback=`
- * in the exit report counts those quanta after the first frame. It is LARGE
- * after boot and a project load (the DSP freezes for up to ~1 s of guest
- * time while the loader ignores it; silicon's ESAI would keep clocking) and
- * small in steady play (a few >0.8 ms delivery holds). `max_quiet=` is the
- * longest frameless gap seen.
+ * in the exit report counts those quanta after the first frame, and it
+ * should be 0; `max_quiet=` is the longest frameless gap seen (~2^16 insns).
  *
- * The threshold is from a histogram of frameless gaps (OCTA_GCLK_LOG): the
- * normal holds are all <= 2^13 insns, a cluster of ~30/s sits at 2^16, then
- * a sparse tail runs to 2^27. 2^17 clears both groups of model holds.
+ * ☠ A nonzero `fallback=` means the DSP froze, and the last time it did the
+ * cause was LOST INTERRUPTS, not the firmware: the two INTCs each drove the
+ * CPU's single level on their own, so INTC1 re-evaluating cancelled a pending
+ * INTC0 request (the DSP's HREQ) and vice versa (patches/qemu/0018). Before
+ * that fix the codec sat at its TX latch for up to ~1 s of guest time during
+ * every project load, frameless gaps ran to 2^27 insns, and this fallback was
+ * carrying the timers. The 2^17 threshold is from that histogram; with 0018
+ * it only ever covers boot, before the codec's first frame.
  *
  * Deadlines are checked on guest progress (ot_guest_progress) against one
  * cached minimum, unlocked; the BQL is taken only to fire. OCTA_HOST_TIMERS=1

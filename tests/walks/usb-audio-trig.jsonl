@@ -5,6 +5,8 @@
 # capture's window lands. A long final hold keeps the Octatrack alive for the
 # capture + the recording flush. Every wait is GUEST time.
 {"wait_text":"PTCH","timeout_ms":600000}
+{"wait_guest_ms":500}
+{"wait_gone":"L0ADING","timeout_ms":300000}
 {"wait_guest_ms":8000}
 {"mark":"ready"}
 {"wait_guest_ms":8000}

@@ -22,6 +22,8 @@
 # says a wait should never be. It stays one because no screen or lamp is known
 # to change when the guest becomes ready; finding that observable is the fix.
 {"wait_text":"PTCH","timeout_ms":600000}
+{"wait_guest_ms":500}
+{"wait_gone":"L0ADING","timeout_ms":300000}
 {"wait_guest_ms":16000}
 {"mark":"t1"}
 {"tap":"TRIG9"}

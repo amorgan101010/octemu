@@ -11,6 +11,8 @@
 # measured as 5 s of tones then silence, and 0/16 channels loud. A lost tap
 # fails the gate honestly (nothing loud); a redone one fails it misleadingly.
 {"wait_text":"PTCH","timeout_ms":600000}
+{"wait_guest_ms":500}
+{"wait_gone":"L0ADING","timeout_ms":300000}
 {"wait_guest_ms":8000}
 {"mark":"ready"}
 {"wait_guest_ms":8000}

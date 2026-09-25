@@ -46,6 +46,7 @@
 #include "qom/object.h"
 #include "qemu/main-loop.h"
 #include "exec/ot-insn-budget.h"
+#include "target/m68k/cpu.h"
 #include "ot-qemu.h"
 
 #define OT_ATA_SIZE         0x1000         /* a whole target page */
@@ -420,6 +421,12 @@ static bool ot_ata_irq_try(OTAta *s, bool idle)
     }
     s->irq_due = false;
     timer_del(s->irq_timer);
+    if (ot_ata_log() && !s->gate_armed) {                   /* DIAG */
+        CPUM68KState *env = cpu_env(first_cpu);
+        fprintf(stderr, "ATARD irq ret=%llu blk=%llu sr=%#x pc=%#x idle=%d\n",
+                (unsigned long long)ot_insn_retired(),
+                (unsigned long long)ot_dsp_blocks(), env->sr, env->pc, idle);
+    }
     ot_ata_set_irq(s, true);
     return true;
 }
@@ -721,6 +728,11 @@ static uint64_t ot_ata_data_read(OTAta *s, unsigned size)
     if (s->xfer != XFER_TO_HOST) {
         return 0;
     }
+    if (ot_ata_log() && s->buf_pos == 0) {                      /* DIAG */
+        CPUM68KState *env = cpu_env(first_cpu);
+        fprintf(stderr, "ATARD data0 ret=%llu pc=%#x sr=%#x\n",
+                (unsigned long long)ot_insn_retired(), env->pc, env->sr);
+    }
     for (unsigned i = 0; i < size; i++) {   /* big-endian: disk order */
         val = (val << 8) | s->buf[s->buf_pos + i];
     }
@@ -802,6 +814,12 @@ static uint64_t ot_ata_read(void *opaque, hwaddr addr, unsigned size)
     case ATA_DRIVE_LBA_HIGH: return s->lba_high;
     case ATA_DRIVE_DEV_HEAD: return s->dev_head;
     case ATA_DRIVE_STATUS:
+        if (ot_ata_log() && s->intrq && s->xfer == XFER_TO_HOST) {   /* DIAG */
+            CPUM68KState *env = cpu_env(first_cpu);
+            fprintf(stderr, "ATARD ack status ret=%llu pc=%#x sr=%#x pos=%u left=%u\n",
+                    (unsigned long long)ot_insn_retired(), env->pc, env->sr,
+                    s->buf_pos, s->xfer_left);
+        }
         ot_ata_set_irq(s, false);      /* reading STATUS acknowledges INTRQ */
         return s->status;
     case ATA_DRIVE_ALT_STATUS:
@@ -845,6 +863,12 @@ static void ot_ata_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
          * and it spins on DRQ at 0x4001551e forever at IPL 5, which also
          * silences every lower-priority task (keys, UI). */
         if (val & IER_INT) {
+            if (ot_ata_log() && s->intrq && s->xfer == XFER_TO_HOST) { /* DIAG */
+                CPUM68KState *env = cpu_env(first_cpu);
+                fprintf(stderr, "ATARD ack icr ret=%llu pc=%#x sr=%#x pos=%u left=%u\n",
+                        (unsigned long long)ot_insn_retired(), env->pc, env->sr,
+                        s->buf_pos, s->xfer_left);
+            }
             ot_ata_set_irq(s, false);
         }
         break;

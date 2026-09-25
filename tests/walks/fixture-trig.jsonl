@@ -3,7 +3,9 @@
 # wall-clock waits gave the guest 5.0 s of audio and every gesture landed in
 # an Octatrack that had barely booted.
 {"wait_text":"PTCH","timeout_ms":180000}
-{"wait_guest_ms":6000}
+{"wait_guest_ms":500}
+{"wait_gone":"L0ADING","timeout_ms":300000}
+{"wait_guest_ms":3000}
 {"press":"FUNC"}
 {"wait_guest_ms":800}
 {"tap":"FX1","until":"FX1 5ETUP","verify_ms":20000,"timeout_ms":150000}

@@ -2,6 +2,8 @@
 # emits a sustained clock/transport stream while an external driver drains
 # EP2 IN and checks the drop counter (tests/usb-midi-stress.sh).
 {"wait_text":"PTCH","timeout_ms":600000}
+{"wait_guest_ms":500}
+{"wait_gone":"L0ADING","timeout_ms":300000}
 {"wait_guest_ms":6000}
 {"mark":"ready"}
 {"wait_guest_ms":6000}

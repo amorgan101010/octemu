@@ -4,6 +4,8 @@
 # stock builds (boot readiness, not key loss).
 # Every verified tap that has to be redone prints "re-tap (key lost)".
 {"wait_text":"PTCH","timeout_ms":180000}
+{"wait_guest_ms":500}
+{"wait_gone":"L0ADING","timeout_ms":300000}
 {"wait_guest_ms":3000}
 {"tap":"PLAY","until_lamp":1,"lit":1,"settle_ms":120,"verify_ms":3000,"timeout_ms":60000}
 {"tap":"REC"}

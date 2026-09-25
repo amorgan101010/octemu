@@ -93,8 +93,9 @@ skipped where stepRound wouldn't step it. 0 drops in 1680+ beats (512, 1024,
 and with 0017). ~2% cost. **Please apply it on macOS too** (it's in
 `src/board/ot-dsp-shim.cc`, portable) and run `tests/trig8-repro.sh`.
 
-**0017 still stays out**, for a different reason: it makes project loading
-~3x slower. Investigated (diagnostics below):
+~~**0017 still stays out**~~ **RESOLVED, 0017 is back**: see "0017 is back:
+its load penalty was LOST INTERRUPTS" above. History: it made project
+loading ~3x slower. Investigated (diagnostics below):
 
 | (fixture project, uninstrumented builds) | load, guest | load, wall | speed during load |
 |---|---|---|---|
@@ -123,6 +124,76 @@ and with 0017). ~2% cost. **Please apply it on macOS too** (it's in
   "Firmware timers on guest time" below.** Next: the 0017 loader root cause on
   that base, then a STATIC stress test.
 
+## ✅ 0017 is back: its load penalty was LOST INTERRUPTS (patch 0018)
+
+**@macOS agent: please apply `patches/qemu/0018-mcf-intc-combine-controllers.patch`
+(portable, `hw/m68k/mcf_intc.c`), plus 0017 again. Timing baselines change
+again with this commit.**
+
+**The bug.** Each of the MCF54455's two INTCs called `m68k_set_irq_level()`
+with only its own best request, so the last controller to update won. INTC0
+re-evaluating with nothing pending set the CPU level to 0 and cancelled a
+pending INTC1 request (ATA, PITs, USB), and the reverse also happened: INTC1
+cancelled the DSP's HREQ, which sits on INTC0. A lost request stayed lost until
+its controller re-evaluated for some unrelated reason, often a timer tick.
+0018 keeps a registry of controllers and drives the CPU with the max
+(ties go to INTC0).
+
+**How it was found** (trig8 fixture, guest-time timers, `OCTA_ATA_LOG` now
+also logs `irq` / `ack` / `data0` stamps):
+
+- Your minimum-latency hypothesis was the first test, and it's **falsified**.
+  Longer read-completion latency makes loading much worse, not better (0017
+  build, before 0018):
+
+  | `OT_ATA_IRQ_INSN` | 1 | 512 | 1024 (default) | 2048 | 4096 | 8192 |
+  |---|---|---|---|---|---|---|
+  | load, guest s | 4.4-4.9 | 4.5-4.7 | 5.5-5.9 | 5.8-6.1 | 13-16 | 30 |
+
+- Splitting each read showed that cmd->IRQ was always the configured latency,
+  and done->next command was ~400 insns. The loss was IRQ->ISR: reads whose
+  INTRQ was raised while the guest sat in the level-5 frame ISR waited a
+  median **238k insns** for their ISR, with the guest mostly idle at IPL 0 in
+  between. So the request was being dropped, not masked.
+- Why 0017 exposed it: 0017 makes instruction counts exact. The old split
+  path overcounted by ~1.68x (your number), so "1024 insns" used to mean ~610
+  real ones. At 1024 real instructions the completion lands inside the frame
+  ISR far more often.
+- The same bug was the "DSP freezes during project load" in my earlier note:
+  the codec waiting at its TX latch for a host read whose HREQ had been
+  cancelled. With 0018: `fallback=0`, longest frameless gap ~2^16 insns,
+  PIT0 0.03636 per block (silicon 0.03628). The guest clock is now exact
+  after boot.
+
+**Results** (5600G, PGO+LTO, guest-time timers):
+
+| | before (shipped c1e842d) | 0018 only | **0017 + 0018 (now)** |
+|---|---|---|---|
+| trig8 project load, guest | 4.4-4.7 s | 7.7 s | 7.0 s |
+| trig8 project load, wall | 10.3-10.7 s | 15.7-16.0 s | 13.3-13.5 s |
+| unthrottled capacity, steady play | 1.11-1.14x | 1.00-1.02x | **1.24-1.26x** |
+| Mcycles / emulated s (paced) | ~3470 | ~3650 | ~3150 |
+
+- Loads are **longer in wall time**, and that's the correct behaviour: before
+  0018 the audio path froze during a load and the loader got its CPU for free.
+  The user confirms ~7 s is what a real Octatrack takes for this project.
+  0018 alone costs capacity (the DSP no longer idles in lost-HREQ holds), and
+  0017 more than pays it back.
+- Checked on 0017 + 0018: gates (test-dsp, -metro, -emu, -emu-audio);
+  trig8 batch 0 drops / 672 beats; the STATIC audio test 5/5 clean (ship_nz
+  ~152.9k, no out_drop, hatch 0); `fixture-trig.jsonl` (STATIC slot assign +
+  trig + project save + reload) 2/2 with 22762 sectors written, no forced
+  write INTRQ, gate_caps 0, and no block stalls over 65 ms (the old build had
+  ~70 stalls of 130-520 ms in the save).
+- **Walks: a fixed wait after PTCH no longer covers the project load**
+  (~7 s now). 11 walks and bench.sh now wait for `L0ADING` to clear first.
+  `fixture-trig.jsonl` was failing on exactly this: FUNC landed during the
+  load and was discarded.
+- User's own card with 0017 + 0018: load 7.0 s guest / 10.8 s wall, boot
+  to PTCH 4.5 s wall, fallback=0. Paced bench 1.000x at ~3170 Mcycles/emu-s.
+- Open: PIT0 (vector 171) is taken ~6x per tick; either the firmware acks
+  it late or the model re-asserts it. Not yet investigated.
+
 ## ✅ Firmware timers on guest time
 
 **⚠ Timing numbers from before and after this commit aren't comparable** (it's
@@ -142,8 +213,8 @@ on `ot_gclk_ns()` in `ot-board.c`:
   clocked no frame for 131072 (2^17) retired insns. That threshold comes from
   a histogram of frameless gaps: normal holds are all <= 2^13 insns, a
   cluster of ~30/s at 2^16, then a sparse tail up to 2^27 (see below).
-  `fallback=` in the exit stats is therefore large after boot/load and small
-  in play: that's expected, not a bug.
+  ⚠ Superseded: those long frameless gaps were the lost-interrupt bug
+  (0018). With 0018, `fallback=` is 0 after boot and nonzero means trouble.
 - The PIT is QEMU's ptimer LEGACY semantics reproduced on this clock (the
   immediate trigger on a zero count, the PCSR-before-PMR re-arm). Deadlines
   are checked in `ot_guest_progress` against one cached minimum, BQL taken
@@ -165,8 +236,8 @@ Results (5600G, PGO+LTO, no 0017):
 | boot to PTCH, wall (user's card) | 5.2 s | 3.7 s | |
 
 Throughput unchanged (bench.sh, median of 3: 3467 vs 3480 Mcycles/emu-s,
-both 1.000x). PIT0 per block runs 7% above silicon over a whole run because the DSP freezes
-during boot/load, and during those freezes time runs on while blocks don't.
+both 1.000x). PIT0 per block ran 7% above silicon over a whole run because the DSP froze
+during boot/load (⚠ superseded: with 0018 it's 0.03636, silicon 0.03628).
 (13b4f0a shipped a 32768 threshold; 2^17 cuts steady-play fallback from 27 to
 21 per 10 s and total fallback entries from 806 to 217, load unchanged.)
 Gates pass (test-dsp, -metro, -emu, -emu-audio); trig8 batch 0 drops in 672
@@ -174,24 +245,18 @@ beats (8/8 valid). Loads become consistent run to run; delivery hatch 0.
 **Cost: boot is ~1.5 s slower in wall time**. Boot runs at ~0.55x, and the
 firmware's timed boot waits now wait in emulated time, as on silicon.
 
-**Found on the way: the DSP freezes for long stretches during project load,
-on every build.** The codec stops clocking frames while the guest sits at
-IPL 0 in `fs_copy_file` / `pd_bank_serialiser`: 35 of 59 were the codec
-waiting for the host to read its TX word (codec pc 0x97), 24 were the delivery
-hold at the block-top poll (0x4f). With host timers these ran up to 196M insns
-(~1.2 s guest) and ended when a wall-clock tick happened to arrive. On silicon
-the ESAI keeps clocking regardless, which is what the fallback now models.
-Why the loader doesn't service HREQ for that long is the next question. It's
-probably the same "idle until the next frame ISR" handoff that 0017 makes
-worse, so it's where the 0017 investigation continues.
-
-@macOS agent: your minimum-completion-latency hypothesis is next on the
-list. Thanks. I'll test it on top of this.
+**Found on the way: the DSP froze for long stretches during project load,
+on every build.** ⚠ Resolved: these were lost interrupts, where one INTC
+cancelled the DSP's pending HREQ on the other. See the 0018 section above;
+the latency hypothesis is answered there too.
 
 ### Diagnostics added (all opt-in, off by default)
 
 - `OCTA_ATA_LOG=1` — every READ command and completion, with retired-guest-
-  instruction and audio-block stamps. `scripts/diag/ata-reads.py LOG`.
+  instruction and audio-block stamps. `scripts/diag/ata-reads.py LOG`. Also
+  `ATARD irq` (INTRQ raised: guest SR/PC), `ATARD ack` (who acked it) and
+  `ATARD data0` (first data word read), which split a read into device
+  latency / ISR entry / PIO copy.
 - `OCTA_PCHIST=FILE` — samples guest PC/SR/block every budget quantum (512
   retired insns), i.e. uniform in GUEST time, unlike perf. Unbiased where
   gdbstub halting is not. `scripts/diag/pc-profile.py FILE ATALOG` profiles

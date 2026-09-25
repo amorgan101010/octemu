@@ -9,6 +9,8 @@
 # the USB stream is the readback arena times 63/64, not sample-exact, so the
 # fidelity oracle only holds on a dry track.
 {"wait_text": "PTCH", "timeout_ms": 600000}
+{"wait_guest_ms":500}
+{"wait_gone":"L0ADING","timeout_ms":300000}
 {"wait_guest_ms": 12000}
 {"mark": "boot"}
 {"tap": "TRACK1"}

@@ -1,0 +1,85 @@
+hw/m68k/mcf_intc: drive the CPU with the highest request across controllers
+
+Each controller called m68k_set_irq_level() with only its own best request,
+so with two INTCs (MCF54455) the last one to update won. INTC0 updating with
+nothing pending cancelled a pending INTC1 request (ATA, PITs, USB) until INTC1
+next re-evaluated for an unrelated reason. Measured on the Octatrack: card-read
+INTRQs raised during the level-5 audio frame ISR waited a median 238k guest
+instructions for their ISR, which is most of what patch 0017 costs a project
+load. Keep a registry of controllers and drive the CPU with the max; ties go
+to the earlier (INTC0).
+
+--- a/hw/m68k/mcf_intc.c
++++ b/hw/m68k/mcf_intc.c
+@@ -33,8 +33,40 @@
+     uint8_t icr[64];
+     M68kCPU *cpu;
+     int active_vector;
++    int active_level;
+ };
+ 
++/*
++ * Every controller wired to a CPU, in creation order. The CPU has ONE
++ * interrupt input: its pending level is the highest request across ALL of
++ * its controllers, not whichever controller updated last. With each update
++ * calling m68k_set_irq_level() on its own, a part with two INTCs (the
++ * MCF54455) lost requests: INTC0 re-evaluating with nothing pending set the
++ * CPU level to 0 and cancelled a pending INTC1 request (ATA, the PITs),
++ * which then sat unserviced until INTC1 next updated for some other reason.
++ * Measured on the Octatrack: a card-read INTRQ raised during the level-5
++ * audio frame ISR waited a median 238k instructions for its ISR.
++ * On a tie in level, the earlier controller (INTC0) wins.
++ */
++#define MCF_INTC_MAX 4
++static mcf_intc_state *mcf_intcs[MCF_INTC_MAX];
++
++static void mcf_intc_drive_cpu(M68kCPU *cpu)
++{
++    mcf_intc_state *win = NULL;
++
++    for (int i = 0; i < MCF_INTC_MAX && mcf_intcs[i]; i++) {
++        mcf_intc_state *c = mcf_intcs[i];
++
++        if (c->cpu == cpu && (!win || c->active_level > win->active_level)) {
++            win = c;
++        }
++    }
++    if (win) {
++        m68k_set_irq_level(cpu, win->active_level, win->active_vector);
++    }
++}
++
+ static void mcf_intc_update(mcf_intc_state *s)
+ {
+     uint64_t active;
+@@ -68,7 +100,8 @@
+      * hardcoded +64 delivers the wrong vector for the second controller.
+      */
+     s->active_vector = ((best == 64) ? 24 : (best + s->vector_base));
+-    m68k_set_irq_level(s->cpu, best_level, s->active_vector);
++    s->active_level = best_level;
++    mcf_intc_drive_cpu(s->cpu);
+ }
+ 
+ static uint64_t mcf_intc_read(void *opaque, hwaddr addr,
+@@ -193,6 +226,7 @@
+     s->enabled = 0;
+     memset(s->icr, 0, 64);
+     s->active_vector = 24;
++    s->active_level = 0;
+ }
+ 
+ static const MemoryRegionOps mcf_intc_ops = {
+@@ -256,6 +290,12 @@
+     object_property_set_link(OBJECT(dev), "m68k-cpu",
+                              OBJECT(cpu), &error_abort);
+     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
++    for (int i = 0; i < MCF_INTC_MAX; i++) {
++        if (!mcf_intcs[i]) {
++            mcf_intcs[i] = MCF_INTC(dev);
++            break;
++        }
++    }
+     memory_region_add_subregion(sysmem, base,
+                                 sysbus_mmio_get_region(SYS_BUS_DEVICE(dev), 0));
+     return dev;

@@ -1,4 +1,6 @@
 {"wait_text":"PTCH","timeout_ms":600000}
+{"wait_guest_ms":500}
+{"wait_gone":"L0ADING","timeout_ms":300000}
 {"wait_guest_ms":8000}
 {"tap":"PROJ"}
 {"wait_guest_ms":1000}
