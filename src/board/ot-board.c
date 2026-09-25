@@ -36,7 +36,6 @@
 #include "target/m68k/cpu.h"
 #include "hw/core/irq.h"
 #include "hw/m68k/mcf.h"
-#include "hw/core/ptimer.h"
 #include "hw/core/boards.h"
 #include "hw/core/loader.h"
 #include "system/address-spaces.h"
@@ -469,21 +468,152 @@ static const MemoryRegionOps ot_dspi_ops = {
  * CONTEXT SWITCH (handler 0x40000550), and a PIT0 tick landing inside a DSP
  * transfer sequence is the necessary condition for that sequence to run long —
  * the per-block transfer sequence is what fixes it here. Silicon fixes the
- * ratio at 100 Hz against 2756.25 blocks/s = 0.0363 ticks per block; here it
- * is whatever QEMU_CLOCK_VIRTUAL gives, so `pit0/blk` in the exit report says
- * how far this run is from the hardware it is modelling.
+ * ratio at 100 Hz against 2756.25 blocks/s = 0.0363 ticks per block, and on
+ * guest time (below) so does this; `pit0/blk` in the exit report is the check.
  */
 uint64_t ot_timer_fire_count[8];
 
+/* ------------------------------------------------------------ guest clock -- */
+/*
+ * THE TIMERS RUN ON GUEST TIME. The PITs and DTIMs used to be a QEMU ptimer
+ * and QEMUTimers on QEMU_CLOCK_VIRTUAL, which with icount off is the HOST
+ * clock — while the CPU and the DSP run on retired instructions and meet the
+ * wall only at the block pace. So how many 10 ms preemption ticks landed in a
+ * block depended on how fast the host was running at that moment: boot and
+ * project loading run below real time, and a 50k-block run took pit0=2730
+ * where silicon takes 1830.
+ *
+ * Guest time is the codec core's ESAI frame count at 44.1 kHz: the clock the
+ * pace ties to the wall, and the one silicon ties the timers to by sharing a
+ * crystal. It advances with guest progress, so it moves in steps (every
+ * interleave quantum, plus what the inline drains clock in between), and it
+ * is monotonic by construction rather than by luck — a PIT2 busy-wait polling
+ * a counter that went backwards is a boot hang.
+ *
+ * Before the codec has clocked a frame (boot, before the DSP is loaded), and
+ * whenever it has clocked none for OT_GCLK_STALL_INSN, time falls back to
+ * retired instructions at the measured real-time rate, so a guest waiting on
+ * a timer can never wait on a DSP that is waiting on the guest. `fallback=`
+ * in the exit report counts those quanta after the first frame; it should be
+ * ~0, and `max_quiet=` is the longest frameless gap seen, which is what the
+ * stall threshold has to clear.
+ *
+ * Deadlines are checked on guest progress (ot_guest_progress) against one
+ * cached minimum, unlocked; the BQL is taken only to fire. OCTA_HOST_TIMERS=1
+ * puts the same timers back on QEMU_CLOCK_VIRTUAL, for an A/B in one binary.
+ */
+#define OT_GCLK_FRAME_HZ        44100
+/* 112 quanta of 512 per 362.8 us block, measured at 1.00x: 6.327 ns/insn. */
+#define OT_GCLK_PS_PER_INSN     6327ULL
+#define OT_GCLK_STALL_INSN      32768ULL
+#define OT_GCLK_NEVER           UINT64_MAX
+
+static bool ot_gclk_host;
+static uint64_t ot_gclk_frames;         /* frames credited */
+static uint64_t ot_gclk_fb_ps;          /* instruction time credited, ps */
+static uint64_t ot_gclk_last_f, ot_gclk_last_i, ot_gclk_quiet_i;
+static bool ot_gclk_seen_frame;
+static uint64_t ot_gclk_prev;           /* the last value handed out */
+static uint64_t ot_gclk_fallback, ot_gclk_max_quiet;
+static uint64_t ot_gclk_quiet_hist[32];  /* DIAG: log2 frameless gaps, insns */
+static uint64_t ot_gtimer_next = OT_GCLK_NEVER;
+static QEMUTimer *ot_gtimer_host;       /* OCTA_HOST_TIMERS only */
+
+static void ot_gtimer_resched(void);
+static int ot_gclk_log = -1;            /* OCTA_GCLK_LOG: DIAG */
+static bool ot_gclk_log_on(void)
+{
+    if (ot_gclk_log < 0) {
+        ot_gclk_log = getenv("OCTA_GCLK_LOG") != NULL;
+    }
+    return ot_gclk_log;
+}
+
+/* Guest ns. Includes frames the drains clocked since the last update, so an
+ * MMIO read mid-quantum sees them; never goes backwards. */
+static uint64_t ot_gclk_ns(void)
+{
+    uint64_t f, d, ns;
+
+    if (ot_gclk_host) {
+        return qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    }
+    f = ot_dsp_frames();
+    d = f > ot_gclk_last_f ? f - ot_gclk_last_f : 0;
+    ns = ot_gclk_fb_ps / 1000
+       + (uint64_t)((unsigned __int128)(ot_gclk_frames + d) * 1000000000u
+                    / OT_GCLK_FRAME_HZ);
+    if (ns < ot_gclk_prev) {
+        ns = ot_gclk_prev;
+    }
+    ot_gclk_prev = ns;
+    return ns;
+}
+
+/* Guest progress: credit the frames clocked since last time, or instruction
+ * time when there are none to credit (see above). */
+static void ot_gclk_update(void)
+{
+    const uint64_t f = ot_dsp_frames(), i = ot_insn_retired();
+
+    if (f > ot_gclk_last_f) {
+        if (ot_gclk_seen_frame && i - ot_gclk_quiet_i > ot_gclk_max_quiet) {
+            ot_gclk_max_quiet = i - ot_gclk_quiet_i;
+        }
+        if (ot_gclk_seen_frame) {
+            ot_gclk_quiet_hist[63 - __builtin_clzll((i - ot_gclk_quiet_i) | 1)]++;
+        }
+        ot_gclk_frames += f - ot_gclk_last_f;
+        ot_gclk_quiet_i = i;
+        ot_gclk_seen_frame = true;
+    } else if (!ot_gclk_seen_frame || i - ot_gclk_quiet_i > OT_GCLK_STALL_INSN) {
+        ot_gclk_fb_ps += (i - ot_gclk_last_i) * OT_GCLK_PS_PER_INSN;
+        if (ot_gclk_seen_frame) {
+            ot_gclk_fallback++;
+        }
+    }
+    if (ot_gclk_log_on()) {
+        static bool was_fb;
+        const bool fb = f <= ot_gclk_last_f && ot_gclk_seen_frame
+                        && i - ot_gclk_quiet_i > OT_GCLK_STALL_INSN;
+        if (fb != was_fb) {
+            CPUM68KState *env = cpu_env(first_cpu);
+            fprintf(stderr, "gclk: fallback %s at blk=%llu frames=%llu "
+                    "insn=%llu pc=%#x sr=%#x hold=%#x ata=%d\n",
+                    fb ? "ON" : "off",
+                    (unsigned long long)ot_dsp_blocks(),
+                    (unsigned long long)f, (unsigned long long)i,
+                    env->pc, env->sr, ot_dsp_hold_why(), ot_ata_busy());
+            was_fb = fb;
+        }
+    }
+    ot_gclk_last_f = f;                 /* a lower f is the codec settling */
+    ot_gclk_last_i = i;
+}
+
 void ot_timer_stats(char *buf, size_t len)
 {
+    if (ot_gclk_log_on()) {
+        fprintf(stderr, "gclk quiet hist (log2 insns):");
+        for (int b = 0; b < 32; b++) {
+            if (ot_gclk_quiet_hist[b]) {
+                fprintf(stderr, " %d:%llu", b,
+                        (unsigned long long)ot_gclk_quiet_hist[b]);
+            }
+        }
+        fprintf(stderr, "\n");
+    }
     snprintf(buf, len, "timers pit0=%llu dtim0=%llu dtim1=%llu dtim2=%llu "
-             "dtim3=%llu | idle_skip quanta=%llu",
+             "dtim3=%llu gclk=%s fallback=%llu max_quiet=%llu | "
+             "idle_skip quanta=%llu",
              (unsigned long long)ot_timer_fire_count[4],
              (unsigned long long)ot_timer_fire_count[0],
              (unsigned long long)ot_timer_fire_count[1],
              (unsigned long long)ot_timer_fire_count[2],
              (unsigned long long)ot_timer_fire_count[3],
+             ot_gclk_host ? "host" : "guest",
+             (unsigned long long)ot_gclk_fallback,
+             (unsigned long long)ot_gclk_max_quiet,
              (unsigned long long)ot_insn_idle_quanta);
 }
 
@@ -492,7 +622,12 @@ void ot_timer_stats(char *buf, size_t len)
  * All four PITs; INTC1 sources 43..46. PIT0 is the 10 ms scheduler tick, PIT2
  * a 1.000 ms calibrated polled delay. This firmware writes PCSR (with EN set)
  * BEFORE PMR, so the PMR case must re-run the timer once a real limit exists —
- * without that, ptimer disables itself on the zero limit and the timer is dead.
+ * without that, the timer disables itself on the zero limit and is dead.
+ *
+ * The counter is QEMU's ptimer with PTIMER_POLICY_LEGACY, which is what this
+ * ran on until the timers moved to guest time, reproduced call for call on
+ * ot_gclk_ns() — including the immediate trigger when a timer is (re)started
+ * with its count at zero. Only the clock changed.
  */
 #define OT_PIT0_BASE    0xFC080000
 #define PCSR_EN         0x0001
@@ -502,14 +637,23 @@ void ot_timer_stats(char *buf, size_t len)
 #define PCSR_OVW        0x0010
 #define PCSR_PRE_SHIFT  8
 #define PCSR_PRE_MASK   0x0f00
+/* ptimer's floor on a period ("about ten microseconds is the fastest that
+ * really works"); also what keeps a tiny limit from re-firing in place. */
+#define OT_PIT_MIN_SPAN_NS 10000
 
 typedef struct {
     MemoryRegion iomem;
     qemu_irq irq;
-    ptimer_state *timer;
     uint16_t pcsr, pmr;
     unsigned idx;
+    /* the ptimer */
+    bool enabled, need_reload;
+    uint64_t delta, limit;
+    uint64_t period_fp;                 /* ns per tick, 32.32 */
+    uint64_t next;                      /* guest ns the count reaches zero */
 } OTPit;
+
+static OTPit *ot_pits[4];
 
 static void ot_pit_update(OTPit *s)
 {
@@ -517,13 +661,102 @@ static void ot_pit_update(OTPit *s)
                  (s->pcsr & (PCSR_PIE | PCSR_PIF)) == (PCSR_PIE | PCSR_PIF));
 }
 
-static void ot_pit_trigger(void *opaque)
+static void ot_pit_trigger(OTPit *s)
 {
-    OTPit *s = opaque;
-
     ot_timer_fire_count[4 + s->idx]++;
     s->pcsr |= PCSR_PIF;
     ot_pit_update(s);
+}
+
+static uint64_t ot_pit_span(OTPit *s, uint64_t ticks)
+{
+    uint64_t ns = (uint64_t)(((unsigned __int128)ticks * s->period_fp) >> 32);
+
+    return MAX(ns, OT_PIT_MIN_SPAN_NS);
+}
+
+static uint64_t ot_pit_count(OTPit *s)
+{
+    uint64_t now;
+
+    if (!s->enabled || !s->delta) {
+        return s->delta;
+    }
+    now = ot_gclk_ns();
+    if (now >= s->next) {
+        return 0;                       /* due, not yet fired */
+    }
+    return (uint64_t)(((unsigned __int128)(s->next - now) << 32)
+                      / s->period_fp);
+}
+
+/* ptimer_reload, legacy policy; s->next is the base on entry. */
+static void ot_pit_reload(OTPit *s)
+{
+    if (s->delta == 0) {
+        ot_pit_trigger(s);
+        s->delta = s->limit;
+    }
+    if (!s->period_fp || !s->delta) {
+        s->enabled = false;
+        return;
+    }
+    s->next += ot_pit_span(s, s->delta);
+}
+
+static void ot_pit_commit(OTPit *s)
+{
+    if (ot_gclk_log_on()) {
+        static uint64_t lastl[4];
+        if (s->limit != lastl[s->idx]) {
+            fprintf(stderr, "gclk: pit%u limit=%llu period=%lluns blk=%llu\n",
+                    s->idx, (unsigned long long)s->limit,
+                    (unsigned long long)ot_pit_span(s, s->limit),
+                    (unsigned long long)ot_dsp_blocks());
+            lastl[s->idx] = s->limit;
+        }
+    }
+    if (s->need_reload && s->enabled) {
+        s->need_reload = false;
+        s->next = ot_gclk_ns();
+        ot_pit_reload(s);
+    }
+    ot_gtimer_resched();
+}
+
+static void ot_pit_stop(OTPit *s)
+{
+    if (s->enabled) {
+        s->delta = ot_pit_count(s);
+        s->enabled = false;
+        s->need_reload = false;
+    }
+}
+
+static void ot_pit_run(OTPit *s)
+{
+    if (!s->enabled && s->period_fp) {
+        s->enabled = true;
+        s->need_reload = true;
+    }
+}
+
+/* The count reached zero (ptimer_tick). Late by several periods, it fires
+ * once — PIF is a flag — and keeps its phase. */
+static void ot_pit_expire(OTPit *s, uint64_t now)
+{
+    s->delta = s->limit;
+    if (!s->limit) {
+        ot_pit_reload(s);               /* triggers, then disables */
+        return;
+    }
+    ot_pit_reload(s);
+    ot_pit_trigger(s);
+    if (s->enabled && now >= s->next) {
+        const uint64_t span = ot_pit_span(s, s->limit);
+
+        s->next += ((now - s->next) / span + 1) * span;
+    }
 }
 
 static uint64_t ot_pit_read(void *opaque, hwaddr addr, unsigned size)
@@ -533,7 +766,7 @@ static uint64_t ot_pit_read(void *opaque, hwaddr addr, unsigned size)
     switch (addr) {
     case 0x00: return s->pcsr;
     case 0x02: return s->pmr;
-    case 0x04: return ptimer_get_count(s->timer);
+    case 0x04: return ot_pit_count(s);
     default:   return 0;
     }
 }
@@ -554,33 +787,37 @@ static void ot_pit_write(void *opaque, hwaddr addr, uint64_t value,
             s->pcsr = value;
             break;
         }
-        ptimer_transaction_begin(s->timer);
         if (s->pcsr & PCSR_EN) {
-            ptimer_stop(s->timer);
+            ot_pit_stop(s);
         }
         s->pcsr = value;
         prescale = 1 << ((s->pcsr & PCSR_PRE_MASK) >> PCSR_PRE_SHIFT);
-        ptimer_set_freq(s->timer, (OT_SYS_FREQ / 2) / prescale);
+        s->delta = ot_pit_count(s);
+        s->period_fp = (1000000000ULL << 32) / ((OT_SYS_FREQ / 2) / prescale);
         limit = (s->pcsr & PCSR_RLD) ? s->pmr : 0xffff;
-        ptimer_set_limit(s->timer, limit, 0);
+        s->limit = limit;
         if ((s->pcsr & PCSR_EN) && limit) {
-            ptimer_run(s->timer, 0);
+            ot_pit_run(s);
         }
-        ptimer_transaction_commit(s->timer);
+        ot_pit_commit(s);
         break;
     case 0x02:
-        ptimer_transaction_begin(s->timer);
         s->pmr = value;
         s->pcsr &= ~PCSR_PIF;
         if (s->pcsr & PCSR_RLD) {
-            ptimer_set_limit(s->timer, value, s->pcsr & PCSR_OVW);
+            s->limit = value;
+            if (s->pcsr & PCSR_OVW) {
+                s->delta = value;
+                s->need_reload = s->enabled;
+            }
         } else if (s->pcsr & PCSR_OVW) {
-            ptimer_set_count(s->timer, value);
+            s->delta = value;
+            s->need_reload = s->enabled;
         }
         if ((s->pcsr & PCSR_EN) && value) {
-            ptimer_run(s->timer, 0);       /* PCSR-before-PMR re-arm */
+            ot_pit_run(s);                 /* PCSR-before-PMR re-arm */
         }
-        ptimer_transaction_commit(s->timer);
+        ot_pit_commit(s);
         break;
     default:
         break;
@@ -618,11 +855,13 @@ typedef struct {
     uint16_t dtmr;
     uint8_t dtxmr, dter;
     uint32_t dtrr, dtcr;
-    int64_t start_ns;
+    uint64_t start_ns;                  /* guest ns the count was zero */
+    uint64_t ref_at;                    /* guest ns of the next match */
     qemu_irq irq;
-    QEMUTimer *ref;
     unsigned idx;
 } OTDtim;
+
+static OTDtim *ot_dtims[4];
 
 static unsigned ot_dtim_divider(OTDtim *s)
 {
@@ -651,7 +890,7 @@ static uint32_t ot_dtim_count(OTDtim *s)
     if (!(s->dtmr & DTMR_RST) || !div) {
         return 0;
     }
-    ticks = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->start_ns;
+    ticks = ot_gclk_ns() - s->start_ns;
     return (uint32_t)(ticks * OT_BUS_HZ / 1000000000ULL / div);
 }
 
@@ -670,26 +909,41 @@ static void ot_dtim_arm(OTDtim *s)
 {
     uint64_t period = ot_dtim_period_ns(s);
 
-    if (!(s->dtmr & DTMR_RST) || !(s->dtmr & DTMR_ORRI) || !period) {
-        timer_del(s->ref);
-        return;
+    if (ot_gclk_log_on()) {
+        static uint64_t lastp[4];
+        if (period != lastp[s->idx]) {
+            fprintf(stderr, "gclk: dtim%u period=%lluns dtmr=%#x dtrr=%u "
+                    "blk=%llu\n", s->idx, (unsigned long long)period,
+                    s->dtmr, s->dtrr, (unsigned long long)ot_dsp_blocks());
+            lastp[s->idx] = period;
+        }
     }
-    timer_mod(s->ref, s->start_ns + period);
+    if (!(s->dtmr & DTMR_RST) || !(s->dtmr & DTMR_ORRI) || !period) {
+        s->ref_at = OT_GCLK_NEVER;
+    } else {
+        s->ref_at = s->start_ns + period;
+    }
+    ot_gtimer_resched();
 }
 
-static void ot_dtim_ref_fire(void *opaque)
+/* Late by several periods, a free-running match fires once — REF is a flag —
+ * and keeps its phase. */
+static void ot_dtim_expire(OTDtim *s, uint64_t now)
 {
-    OTDtim *s = opaque;
     uint64_t period = ot_dtim_period_ns(s);
 
     ot_timer_fire_count[s->idx]++;
     s->dter |= DTER_REF;
     ot_dtim_update_irq(s);
     if (!period) {
+        s->ref_at = OT_GCLK_NEVER;
         return;
     }
     if (s->dtmr & DTMR_FRR) {
         s->start_ns += period;
+        if (s->start_ns + period <= now) {
+            s->start_ns += (now - s->start_ns) / period * period;
+        }
     } else {
         /* Restart mode off: the next match is a full 32-bit wrap away. */
         s->start_ns += (1ULL << 32) / (s->dtrr + 1) * period;
@@ -719,7 +973,7 @@ static void ot_dtim_write(void *opaque, hwaddr addr, uint64_t val, unsigned size
     switch (addr) {
     case 0x00:
         if (!(s->dtmr & DTMR_RST) && (val & DTMR_RST)) {
-            s->start_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+            s->start_ns = ot_gclk_ns();
         }
         s->dtmr = val;
         ot_dtim_arm(s);
@@ -741,7 +995,7 @@ static void ot_dtim_write(void *opaque, hwaddr addr, uint64_t val, unsigned size
         s->dtcr = val;
         break;
     case 0x0c:
-        s->start_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        s->start_ns = ot_gclk_ns();
         ot_dtim_arm(s);
         break;
     default:
@@ -756,6 +1010,62 @@ static const MemoryRegionOps ot_dtim_ops = {
     .valid.min_access_size = 1,
     .valid.max_access_size = 4,
 };
+
+/* ------------------------------------------------------- timer deadlines -- */
+
+static void ot_gtimer_resched(void)
+{
+    uint64_t n = OT_GCLK_NEVER;
+
+    for (int i = 0; i < 4; i++) {
+        if (ot_pits[i] && ot_pits[i]->enabled) {
+            n = MIN(n, ot_pits[i]->next);
+        }
+        if (ot_dtims[i]) {
+            n = MIN(n, ot_dtims[i]->ref_at);
+        }
+    }
+    ot_gtimer_next = n;
+    if (ot_gtimer_host) {
+        if (n == OT_GCLK_NEVER) {
+            timer_del(ot_gtimer_host);
+        } else {
+            timer_mod(ot_gtimer_host, n);
+        }
+    }
+}
+
+/* BQL held. */
+static void ot_gtimer_run(uint64_t now)
+{
+    for (int i = 0; i < 4; i++) {
+        if (ot_pits[i] && ot_pits[i]->enabled && now >= ot_pits[i]->next) {
+            ot_pit_expire(ot_pits[i], now);
+        }
+        if (ot_dtims[i] && now >= ot_dtims[i]->ref_at) {
+            ot_dtim_expire(ot_dtims[i], now);
+        }
+    }
+    ot_gtimer_resched();
+}
+
+/* OCTA_HOST_TIMERS: the main loop, BQL held. */
+static void ot_gtimer_host_fire(void *opaque)
+{
+    ot_gtimer_run(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+}
+
+/* Guest progress, vCPU thread, no BQL held (see ot_guest_progress). */
+static void ot_gtimer_poll(void)
+{
+    ot_gclk_update();                   /* host mode: stall stats only */
+    if (ot_gclk_host || ot_gclk_ns() < ot_gtimer_next) {
+        return;
+    }
+    bql_lock();
+    ot_gtimer_run(ot_gclk_ns());
+    bql_unlock();
+}
 
 /* ------------------------------------------------------------------- eDMA -- */
 /*
@@ -973,6 +1283,7 @@ static void ot_guest_progress(void)
     ot_edma_gate_poll();
     ot_ata_progress();
     ot_dsp_interleave();
+    ot_gtimer_poll();                   /* after the frames it just clocked */
 }
 
 /*
@@ -2646,7 +2957,7 @@ static void octatrack_init(MachineState *machine)
         OTPit *pit = g_new0(OTPit, 1);
 
         pit->idx = i;
-        pit->timer = ptimer_init(ot_pit_trigger, pit, PTIMER_POLICY_LEGACY);
+        ot_pits[i] = pit;
         pit->irq = qdev_get_gpio_in(intc1, OT_PIT_SRC + i);
         memory_region_init_io(&pit->iomem, NULL, &ot_pit_ops, pit,
                               "octatrack.pit", 0x4000);
@@ -2660,13 +2971,22 @@ static void octatrack_init(MachineState *machine)
 
         t->idx = i;
         t->irq = qdev_get_gpio_in(intc, OT_DTIM_SRC + i);
-        t->ref = timer_new_ns(QEMU_CLOCK_VIRTUAL, ot_dtim_ref_fire, t);
+        t->ref_at = OT_GCLK_NEVER;
+        ot_dtims[i] = t;
         /* Page-sized: see the eDMA TCD region below. */
         memory_region_init_io(&t->iomem, NULL, &ot_dtim_ops, t,
                               "octatrack.dtim", 0x1000);
         memory_region_add_subregion_overlap(sysmem,
                                             OT_DTIM0_BASE + 0x4000 * i,
                                             &t->iomem, 1);
+    }
+    {
+        const char *e = getenv("OCTA_HOST_TIMERS");
+        ot_gclk_host = e && *e && strcmp(e, "0") != 0;
+        if (ot_gclk_host) {
+            ot_gtimer_host = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                          ot_gtimer_host_fire, NULL);
+        }
     }
 
     {

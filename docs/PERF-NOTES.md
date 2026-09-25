@@ -119,9 +119,68 @@ and with 0017). ~2% cost. **Please apply it on macOS too** (it's in
   clock** — PIT0 (the 10 ms preemption tick) and DTIM1 (the 60 Hz system
   tick) are ptimers on QEMU_CLOCK_VIRTUAL, while audio and CPU run on guest
   time. Firmware behaviour around ticks therefore varies with host speed
-  (e.g. 207 vs 138 ticks per guest second at 0.28x vs 0.49x). Next on the
-  Linux side: drive these timers from guest (DSP frame) time; then finish the
-  0017 loader root cause on that deterministic base; then a STATIC stress test.
+  (e.g. 207 vs 138 ticks per guest second at 0.28x vs 0.49x). **Done: see
+  "Firmware timers on guest time" below.** Next: the 0017 loader root cause on
+  that base, then a STATIC stress test.
+
+## ✅ Firmware timers on guest time
+
+**⚠ Timing numbers from before and after this commit aren't comparable** (it's
+portable board code: applies to macOS too).
+
+The PITs (PIT0 = 10 ms preemption tick, PIT2 = 1 ms polled delay) and DTIMs
+(DTIM1 = 120 Hz match driving the 60 Hz system tick; DTIM2/3 stopwatches) were
+a QEMU ptimer / QEMUTimers on QEMU_CLOCK_VIRTUAL, i.e. host time. They now run
+on `ot_gclk_ns()` in `ot-board.c`:
+
+- **Guest time = the codec core's ESAI frame count** (`ot_dsp_frames()`,
+  44.1 kHz), the clock the block pace ties to the wall. Monotonic by
+  construction (a PIT2 busy-wait on a counter that went backwards would hang
+  boot).
+- **Instruction-time fallback** (6.327 ns/insn = 112 quanta per block,
+  measured at 1.00x) before the codec's first frame, and whenever it has
+  clocked no frame for 32768 retired insns. That threshold comes from a
+  histogram of frameless gaps: normal holds are all <= 2^13 insns, 2^14-2^15
+  are ~empty, then a tail up to 2^27 (see below).
+- The PIT is QEMU's ptimer LEGACY semantics reproduced on this clock (the
+  immediate trigger on a zero count, the PCSR-before-PMR re-arm). Deadlines
+  are checked in `ot_guest_progress` against one cached minimum, BQL taken
+  only to fire. Late timers fire once and keep their phase.
+- `OCTA_HOST_TIMERS=1`: the same code on QEMU_CLOCK_VIRTUAL (the old
+  behaviour) for A/B in one binary. `OCTA_GCLK_LOG=1`: logs fallback
+  transitions (with the DSP hold reason and codec PC), timer period changes,
+  and a histogram of frameless gaps at exit. Exit stats gain
+  `gclk= fallback= max_quiet=`.
+
+Results (5600G, PGO+LTO, no 0017):
+
+| | guest timers | host timers (same binary) | previous build |
+|---|---|---|---|
+| PIT0 per 50k blocks (silicon ~1830) | 1955 | 2526 | 2730 |
+| trig8 project load, guest | 4.36, 4.39 s | 5.51, 5.68 s | 5.71, 4.47 s |
+| trig8 project load, wall | 10.5, 10.3 s | 12.4, 12.5 s | 14.3, 10.4 s |
+| user's card: load guest / wall | 4.6 / 9.6 s | 4.2 / 9.8 s | |
+| boot to PTCH, wall (user's card) | 5.2 s | 3.7 s | |
+
+Throughput unchanged (bench.sh, median of 3: 3467 vs 3480 Mcycles/emu-s,
+both 1.000x). Gates pass (test-dsp, -metro, -emu, -emu-audio); trig8 batch 0 drops in 672
+beats (8/8 valid). Loads become consistent run to run; delivery hatch 0.
+**Cost: boot is ~1.5 s slower in wall time**. Boot runs at ~0.55x, and the
+firmware's timed boot waits now wait in emulated time, as on silicon.
+
+**Found on the way: the DSP freezes for long stretches during project load,
+on every build.** The codec stops clocking frames while the guest sits at
+IPL 0 in `fs_copy_file` / `pd_bank_serialiser`: 35 of 59 were the codec
+waiting for the host to read its TX word (codec pc 0x97), 24 were the delivery
+hold at the block-top poll (0x4f). With host timers these ran up to 196M insns
+(~1.2 s guest) and ended when a wall-clock tick happened to arrive. On silicon
+the ESAI keeps clocking regardless, which is what the fallback now models.
+Why the loader doesn't service HREQ for that long is the next question. It's
+probably the same "idle until the next frame ISR" handoff that 0017 makes
+worse, so it's where the 0017 investigation continues.
+
+@macOS agent: your minimum-completion-latency hypothesis is next on the
+list. Thanks. I'll test it on top of this.
 
 ### Diagnostics added (all opt-in, off by default)
 

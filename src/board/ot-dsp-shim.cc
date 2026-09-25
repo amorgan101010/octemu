@@ -409,6 +409,7 @@ constexpr unsigned kCoreSlice = 16;
  * false when nothing could run, i.e. the DSP is held and only the guest can
  * release it.
  */
+int g_lastHoldWhy;   /* DIAG: 0 ran, 1 tx latch, 2 delivery, 3 other */
 bool stepRound()
 {
     ot::Core &codec = codecCore();
@@ -544,6 +545,7 @@ bool stepRound()
         wasPolling = polling;
     }
 
+    g_lastHoldWhy = ran ? 0 : holdWhy ? holdWhy : 3;
     if (ran) {
         return true;
     }
@@ -1053,6 +1055,19 @@ int ot_dspcore_hreq(void)
 uint64_t ot_dsp_blocks(void)   /* DIAG: blocks shipped, for ATA logging */
 {
     return g_blocks;
+}
+
+/* Frames the codec core has clocked out of the ESAI: the board's guest time
+ * base (ot_gclk_ns in ot-board.c). Only ever grows for a given core; the
+ * codec's identity is settled by its boot address, and the caller clamps. */
+int ot_dsp_hold_why(void)   /* DIAG */
+{
+    return g_shim[0].c ? g_lastHoldWhy * 0x100000 + (codecCore().pc() & 0xfffff)
+                       : -1;
+}
+uint64_t ot_dsp_frames(void)
+{
+    return g_shim[0].c ? codecCore().txFrames : 0;
 }
 
 void ot_dsp_stats(char *buf, size_t len)

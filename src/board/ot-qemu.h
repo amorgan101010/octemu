@@ -113,6 +113,9 @@ void ot_edma_gate_poll(void);
  * caught up. Polled on guest progress; see OT_WR_BACKSTOP_NS in ot-ata.c. */
 void ot_ata_progress(void);
 uint64_t ot_dsp_blocks(void);
+/* ESAI frames the codec core has transmitted (44.1 kHz): guest time. */
+uint64_t ot_dsp_frames(void);
+int ot_dsp_hold_why(void);   /* DIAG: why<<20 | codec pc */
 /* The firmware's per-block DSP transfer state counter (0x46104d3e). */
 uint32_t ot_edma_state_ctr(void);
 /* Retired guest instructions, and the stamp of the first arm of the block in
