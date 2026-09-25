@@ -792,9 +792,19 @@ void skin_render(void)
      * pixels only when the panel link has actually written to the display.
      * fb_gen is bumped per display block by panel.c. */
     if (!g_screen_valid || p.fb_gen != g_screen_gen) {
+        static uint8_t fallback[H][W * 4];
+        const bool locked = SDL_LockTexture(g_skin.screen_tex, NULL, &px,
+                                            &pitch) == 0;
+
+        /* ☠ A lock can fail: SDL's offscreen video driver on macOS refuses
+         * it, and writing through the unset pointer was a SIGBUS. Expand into
+         * a buffer and upload it instead; the display is only 32 KB. */
+        if (!locked) {
+            px = fallback;
+            pitch = W * 4;
+        }
         g_screen_valid = true;
         g_screen_gen = p.fb_gen;
-        SDL_LockTexture(g_skin.screen_tex, NULL, &px, &pitch);
         for (int y = 0; y < H; y++) {
             uint8_t *row = (uint8_t *)px + y * pitch;
 
@@ -807,7 +817,11 @@ void skin_render(void)
                 row[x * 4 + 3] = 0xFF;
             }
         }
-        SDL_UnlockTexture(g_skin.screen_tex);
+        if (locked) {
+            SDL_UnlockTexture(g_skin.screen_tex);
+        } else {
+            SDL_UpdateTexture(g_skin.screen_tex, NULL, fallback, W * 4);
+        }
     }
     /* Snap the blit to an integer pixel multiple when one lies near the bezel
      * rect (the sliver of margin hides in the dark cutout); the default window
