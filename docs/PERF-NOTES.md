@@ -76,7 +76,7 @@ benchmarks overstate headroom for real use by ~10%+.
   VTune archive link, `--disable-werror`, `-lstdc++` — Linux-only, no effect
   on Darwin.
 
-## ✅ Dropped FLEX trigs: ROOT-CAUSED AND FIXED (commit 74930ca)
+## ⚠ Dropped FLEX trigs: fixed for the trig8 case (74930ca), NOT in general (bug-031 below)
 
 **Cause**: shim paths advanced ONE DSP core alone — the inline ICR/CVR drains
 (`step(64)`, ~10 per block), host-transmit pops/read bursts (`step(64)`) and
@@ -148,7 +148,8 @@ e1 = core-1 execs since core 1 took the 2:
 | stepPair | 505 (e1 0-199) | 5 (boot and outliers) |
 | lone | 111 (e1 100-199) | 397 (e1 1100-1250) |
 
-stepPair keeps one regime. Lone stepping lets the landings switch between the
+In this project stepPair keeps one regime (but see bug-031 below: it does
+not in every project). Lone stepping lets the landings switch between the
 two. **A beat drops exactly when that switch falls between the strobe record
 and the record after it**: the strobe lands ahead (e1 = 1113) and the
 follow-up lands in-render (e1 = 121). Checked beat by beat against the trig8
@@ -162,8 +163,9 @@ the release, and why the in-block phase decides where the switch falls. The
 render reads word 30 from per-frame copies (x:$208 -> x:$25d + k*$20, 3 reads
 per block on a rotating slot set), not from the bank. Tracing that copy is the
 next step if it matters. No margin is measured for this handoff, because the
-consuming read is not identified. Its safety under stepPair is empirical:
-0 drops in 672 beats here and 1680+ before.
+consuming read is not identified. Its safety under stepPair was only
+empirical (0 drops in 672 beats here, 1680+ before), and bug-031 below
+breaks it.
 
 **Audit of the paths where one core runs without the other** (current code;
 every step goes through `stepRound` or `stepPair`, and the drains, stalls, pops
@@ -190,6 +192,66 @@ so each path is judged for both:
 
 Open: the tracing hooks add a null-pointer test to `Core::step`'s per-exec
 loop. Run a `scripts/bench.sh` A/B before relying on "no cost".
+
+### ⚠ bug-031 (2026-09-26): stepPair does NOT cover every configuration
+
+In the user's TESTDROPOUT project (now `tests/fixtures/trigsweep`: 8 FLEX
+tracks trigging every 16th, comb filter on T1 FX2, a Neighbor on T2, spring
+reverb on T3 FX2), T1 heard through T2 and thinned to quarter notes **drops
+[9, 17, ... 81] on the shipped build**. Its body falls to 20% of the median,
+the same size as the original bug. The trace shows the same split: the note-on
+lands ahead (e1 = 1202), the next record in-render (e1 = 20), at exactly the
+10 dropped beats. `tests/trigsweep.sh` reproduces it (case q12).
+
+**Why stepPair cannot hold it.**
+
+- Core 1's host-command 0x88 handler (P:$36d, vector P:$10) programs its DMA
+  destination as `arg AND mask`. Core 1 rewrites that mask in its own code
+  (P:$70/$72: `$3fff` or `$5fff`) each time it takes a bank index. So `$6000`
+  becomes `$2000` or `$4000`: a record lands in whichever bank core 1 took
+  last. The firmware therefore assumes core 1 has finished its block before
+  the ColdFire's LATE transfer (`$6000`, which carries T1's record here,
+  after the early `$6080` one).
+- The shim lockstepped the cores by JIT BLOCKS (kCoreSlice = 16):
+
+  | per audio block (medians) | codec (core 0) | core 1 |
+  |---|---|---|
+  | instructions | 72,400 (silicon: 72,448 cycles) | 21,000-31,000 |
+  | JIT blocks | 1976 | 1280-1520 |
+  | instructions per JIT block | 36.6 | 14-24 |
+
+  Equal JIT-block counts ran core 1 at about half the codec's instruction
+  rate. On silicon the cores share one clock. Core 1 was still rendering
+  when the late transfer arrived. stepPair removed a worse skew (cores
+  stepping alone) but kept the wrong unit.
+
+Which records ride the late transfer depends on the project (T1 here, T4 in
+trig8), which is why the machine/FX setup decides who drops.
+
+**Candidate fix, opt-in: `OCTA_SLICE_MATCH=1`.** The peer of every slice gets
+exactly the instructions its partner just retired. The codec keeps kCoreSlice
+JIT blocks, so its pace and the calibrated ColdFire:DSP ratio do not move.
+Linux, worktree build:
+
+| | shipped | OCTA_SLICE_MATCH=1 |
+|---|---|---|
+| trigsweep q12 (bug-031) | drops [9, 17, ... 81] | clean |
+| trigsweep q1-q8 | clean (q1 silent: its output feeds T2) | clean |
+| trig8 batch | 0 / 672 | 0 / 672 |
+| test-emu-audio | pass | 3/3 pass |
+| test-emu | pass | pass |
+
+With `OCTA_LONE_CORE=1`, q3 and q4 drop too; T5-T8 (the other core) never
+drop in this project. `OCTA_SLICE_INS=N` (both cores N instructions) is a
+diagnostic only: 585 is clean, but 256 breaks trig8 at a new phase, because
+it also slows the codec.
+
+**Still to do before it can ship** (plan: `docs/plan-validate-slice-match.md`):
+project-load time, a `bench.sh` A/B, the margin on the guest-instruction clock
+(`scripts/diag/handoff-margin.py`), and a machine/FX combo sweep, especially
+Neighbors and FX on T5-T8. The codec's clock is the wrong ruler for the
+margin: the race is decided while the codec is frozen holding its bank-index
+word.
 
 ~~**0017 still stays out**~~ **RESOLVED, 0017 is back**: see "0017 is back:
 its load penalty was LOST INTERRUPTS" above. History: it made project

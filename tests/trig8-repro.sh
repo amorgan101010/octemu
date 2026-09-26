@@ -5,6 +5,8 @@
 #   tests/trig8-repro.sh [label]            current build
 #   OCTEMU_QEMU=/path/qemu tests/trig8-repro.sh label    another QEMU binary
 #   OCTEMU_ARGS="--interleave 1024" tests/trig8-repro.sh label
+#   FX=dir WALK=file tests/trig8-repro.sh label   another fixture / walk
+#                                                (tests/trigsweep.sh uses these)
 #
 # The fixture (tests/fixtures/trig8/) is a real user project: a set with a
 # single-cycle slice on a FLEX machine on track 4, trigged every quarter note
@@ -21,17 +23,19 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 LABEL=${1:-trig8}
-FX=tests/fixtures/trig8
+FX=${FX:-tests/fixtures/trig8}
+WALK=${WALK:-$FX/walk.jsonl}
 W=$(mktemp -d out/trig8.XXXX)
 trap 'rm -rf "$W"' EXIT
 
 scripts/mkcard.sh "$W/card.img" 256 >/dev/null
 mkdir -p "$W/set" && tar xzf "$FX/set.tgz" -C "$W/set"
-python3 scripts/card.py copytree "$W/card.img" "$W/set/Set 260924" "/Set 260924" >/dev/null
+SET=$(ls "$W/set" | head -1)
+python3 scripts/card.py copytree "$W/card.img" "$W/set/$SET" "/$SET" >/dev/null
 gzip -dc "$FX/nvram.bin.gz" > "$W/nvram.bin"
 
 ./octemu --headless --read-only --cf-card "$W/card.img" --nvram "$W/nvram.bin" \
-    ${OCTEMU_ARGS:-} --script "$FX/walk.jsonl" --recording "$W/out.wav" \
+    ${OCTEMU_ARGS:-} --script "$WALK" --recording "$W/out.wav" \
     --timeout 580 > "$W/log" 2>&1 || { echo "$LABEL: run failed"; tail -5 "$W/log"; exit 2; }
 blk=$(grep -ao '\[mark\] blk=[0-9]* [0-9]* play' "$W/log" | grep -o 'blk=[0-9]*' | cut -d= -f2)
 [ -n "$blk" ] || { echo "$LABEL: no play mark"; exit 2; }
