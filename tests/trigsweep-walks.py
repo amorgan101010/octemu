@@ -5,7 +5,8 @@
     tests/trigsweep-walks.py OUTDIR
 
 Writes OUTDIR/q<N>.jsonl for N = 1..8, and OUTDIR/q12.jsonl (T1 heard through
-its Neighbor on T2). Each walk boots the trigsweep fixture, waits out LOADING,
+its Neighbor on T2), and OUTDIR/q56.jsonl (T5 through a Neighbor on T6, for
+variants that have one: tests/trigsweep-variant.py). Each walk boots the trigsweep fixture, waits out LOADING,
 enters grid record, turns off every step of track N except 1/5/9/13, leaves
 grid record, mutes every other track, presses PLAY and records 40 s.
 
@@ -64,6 +65,8 @@ def main():
             f.write(walk(n, {n}))
     with open(os.path.join(out, 'q12.jsonl'), 'w') as f:
         f.write(walk(1, {1, 2}))
+    with open(os.path.join(out, 'q56.jsonl'), 'w') as f:    # variants: T5 into a Neighbor on T6
+        f.write(walk(5, {5, 6}))
 
 
 if __name__ == '__main__':

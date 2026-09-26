@@ -7,6 +7,7 @@
 #   OCTEMU_QEMU=/path/qemu tests/trigsweep.sh ...   another binary
 #   OCTA_SLICE_MATCH=1 / OCTA_LONE_CORE=1 tests/trigsweep.sh ...  stepping modes
 #   TIMEOUT=1200 tests/trigsweep.sh ...      per-run wall limit (a slow host)
+#   FX=dir tests/trigsweep.sh ...            a variant (tests/trigsweep-variant.py)
 #
 # Each case solos one track of tests/fixtures/trigsweep (the user's TESTDROPOUT
 # project: 8 FLEX tracks trigging every 16th, comb filter on T1 FX2, Neighbor
@@ -39,7 +40,7 @@ run() {
     local c=$1 l="sweep-$LABEL-$1" b s
     mkdir -p out
     rm -f "out/trig8-$l.log" "out/trig8-$l.wav"   # a failed rerun must not score the last run
-    FX=tests/fixtures/trigsweep WALK="$W/$c.jsonl" $LOW tests/trig8-repro.sh "$l" \
+    FX=${FX:-tests/fixtures/trigsweep} WALK="$W/$c.jsonl" $LOW tests/trig8-repro.sh "$l" \
         > "out/trig8-$l.out" 2>&1
     b=$(grep -ao '\[mark\] blk=[0-9]* [0-9]* play' "out/trig8-$l.log" 2>/dev/null \
         | grep -o 'blk=[0-9]*' | cut -d= -f2)
@@ -51,7 +52,7 @@ run() {
     echo "$c: $s $(grep -ao 'hatch=[0-9]*' "out/trig8-$l.log" | tail -1)"
 }
 export -f run
-export LABEL W LOW
+export LABEL W LOW FX
 out=$(printf '%s\n' $CASES | xargs -P "$P" -I{} bash -c 'run {}' | sort -k1.2n)
 echo "$out"
 n=$(echo "$out" | grep -c 'drops at beats \[[0-9]' || true)
