@@ -61,6 +61,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include "dsp56kEmu/disasm.h"
 #include "ot-dsp56k.h"
 #include "ot-qemu.h"
 #include "ot-audio-shm.h"
@@ -388,6 +389,421 @@ ShimCore &codecShim()
  */
 constexpr auto kDeliveryHold = std::chrono::milliseconds(250);
 
+/* ---- DIAG: lone-core stepping and the handoff trace ------------------------
+ * Both off by default. With neither set, no hook is installed and the chip
+ * steps exactly as it does without this block.
+ *
+ * OCTA_LONE_CORE=1 brings back the pre-74930ca stepping: every stepPair call
+ * steps its core alone, and write_burst's full-FIFO stall steps the peer 64
+ * after it, as it used to. That is the dropped-FLEX-trig bug on demand.
+ *
+ * OCTA_HANDOFF_TRACE=file traces the core 0 -> core 1 handoff through the
+ * mailbox (y:$ffffd3-d7) and the shared window x:$30000..$30047. One line per
+ * event, ordered by `seq` (every exec of either core), each core also timed
+ * by its own exec count and instruction counter:
+ *   P  core 0 posts a mailbox word; the window is snapshotted
+ *   T  core 1 takes it: the exposure since the post, the execs each call site
+ *      ran in between (by core), and which window words differ from the
+ *      snapshot (nonzero = core 1 reads a message core 0 did not post)
+ *   O  core 0's first window write after a post: its distance from the post
+ *      and, once core 1 has taken the word, from the take — the margin
+ *   W  every window write (detail range only): core, PC, changed words
+ *   L  every stepPair call (detail range only): site, core, n, peer PC
+ *   Q  any other mailbox traffic (detail range only)
+ *   H  host-port traffic, either core (detail range only): ICR resets, host
+ *      commands, argument words (the transfer's dest), write bursts
+ *   R  core 1 takes a bank index (detail range only): the bank it will render
+ *      from, word 30 (the gate/strobe) of all 8 slots, and slot 3 (T4) whole
+ *   B  per block: execs by call site and core
+ *   M  a watched X word changed (whole run): OCTA_HANDOFF_WATCH is
+ *      a comma list of hex X addresses on core 1 (default 207e,407e: word 30
+ *      of slot 3 in both record banks); logs the exec's core, PC and site —
+ *      a write by DMA shows up against whatever code happened to run
+ *   V  core 1 enters a watched PC (OCTA_HANDOFF_PCS, hex list, default 38b:
+ *      the amp/gate render, once per track): x:$207 (bank) and x:$208 (the
+ *      track's record). Whole run, since it is the read side of the record
+ *      handoff; M lines carry the same e1 (core-1 execs since it took the 2)
+ *   S1 strobe-shaped words ($03 01dX) in a write burst: offset and value
+ *   D  a disassembly of both cores' whole payloads, once
+ * Blocks are RECORDING blocks — the frontend's `[mark] blk=` numbering, frame
+ * 16N of the --recording — so OCTA_HANDOFF_FROM/_TO (the detail range) come
+ * straight from a trig8 log. -1 before the frontend attaches.
+ */
+bool g_loneCore = false;
+
+namespace ht {
+
+enum Site { S_ROUND, S_FF, S_DRAIN, S_WSTALL, S_RXPOP, S_WBURST, S_RBURST, S_N };
+const char *const kSiteName[S_N] = {"round", "ff", "drain", "wstall",
+                                    "rxpop", "wburst", "rburst"};
+constexpr TWord kWinBase = 0x30000;
+constexpr unsigned kWin = 0x48;
+
+FILE *f = nullptr;
+int64_t from = 0, to = INT64_MAX;
+int site = S_ROUND;
+uint64_t seq, execs[2], blkExecs[S_N][2];
+TWord shadow[kWin];
+bool dumped = false;
+
+struct Post {
+    bool live = false, taken = false, over = false;
+    TWord w = 0;
+    uint64_t seq = 0, e0 = 0, i0 = 0, e1 = 0;   /* at the post */
+    uint64_t te0 = 0, ti0 = 0, te1 = 0;         /* at the take */
+    uint64_t between[S_N][2] = {};              /* execs, post -> take */
+    TWord snap[kWin] = {};
+} post;
+
+/* Whole-run tallies, by mailbox word class: [0] bank index 0/1, [1] the 2. */
+uint64_t nPost[2], nChanged[2], nOverFirst[2], nUntaken[2];
+uint64_t mHistE[2][24], mHistI[2][24];
+uint64_t mMinE[2] = {UINT64_MAX, UINT64_MAX}, mMinI[2] = {UINT64_MAX, UINT64_MAX};
+
+TWord *win() { return g_chip.core[0].mem->getMemAreaPtr(MemArea_X) + kWinBase; }
+uint64_t ins(unsigned i) { return g_chip.core[i].dsp->getInstructionCounter(); }
+int64_t recBlock()
+{
+    if (!g_shm || g_clientFd.load() < 0) {
+        return -1;
+    }
+    return (int64_t)((g_shm->out_head * kFrames + g_out.count) / kFrames);
+}
+bool detail(int64_t b) { return b >= from && b <= to; }
+unsigned nWatch = 0, nPcs = 0;
+TWord watchPc[16];
+uint64_t e1AtTake2 = 0;
+TWord watchAddr[16], watchVal[16];
+TWord lastTake1 = 0;
+uint64_t lastTake1Seq = 0;
+
+void host(unsigned idx, const char *what, unsigned a, unsigned b2)
+{
+    const int64_t b = recBlock();
+
+    if (!f || !detail(b)) {
+        return;
+    }
+    fprintf(f, "H seq=%llu blk=%lld core=%u %s %#x %u pc0=%#x pc1=%#x "
+            "c1took=%u(%llu ago) c1full=%d rx=%zu\n",
+            (unsigned long long)seq, (long long)b, idx, what, a, b2,
+            g_chip.core[0].pc(), g_chip.core[1].pc(), lastTake1,
+            (unsigned long long)(seq - lastTake1Seq), ot::g_icc.rxFull(1) ? 1 : 0,
+            g_chip.core[idx & 1].hdi().rxData().size());
+}
+unsigned bucket(uint64_t v)
+{
+    unsigned b = 0;
+    for (; v > 1 && b < 23; v >>= 1) {
+        b++;
+    }
+    return b;
+}
+
+void disasm(unsigned core, TWord lo, TWord hi)
+{
+    ot::Core &c = g_chip.core[core];
+    const TWord *p = c.mem->getMemAreaPtr(MemArea_P);
+    Disassembler d(c.dsp->opcodes());
+
+    for (TWord pc = lo; pc < hi;) {
+        std::string s;
+        const uint32_t n = d.disassemble(s, p[pc], p[pc + 1], 0,
+                                         c.dsp->regs().omr.toWord(), pc);
+        fprintf(f, "D core=%u p=%#06x %06x %s\n", core, pc, p[pc], s.c_str());
+        pc += n ? n : 1;
+    }
+}
+
+void onExec(ot::Core &c, TWord pcBefore)
+{
+    const unsigned k = c.index;
+
+    seq++;
+    execs[k]++;
+    blkExecs[site][k]++;
+    if (post.live && !post.taken) {
+        post.between[site][k]++;
+    }
+    if (k == 1) {
+        for (unsigned i = 0; i < nPcs; i++) {
+            if (pcBefore == watchPc[i]) {
+                const TWord *x1 = g_chip.core[1].mem->getMemAreaPtr(MemArea_X);
+
+                fprintf(f, "V seq=%llu blk=%lld pc=%#x e1=%llu bank=%#x rec=%#x site=%s\n",
+                        (unsigned long long)seq, (long long)recBlock(), pcBefore,
+                        (unsigned long long)(execs[1] - e1AtTake2), x1[0x207], x1[0x208],
+                        kSiteName[site]);
+            }
+        }
+    }
+    if (nWatch) {
+        const TWord *x1 = g_chip.core[1].mem->getMemAreaPtr(MemArea_X);
+
+        for (unsigned i = 0; i < nWatch; i++) {
+            const TWord v = x1[watchAddr[i]];
+            if (v != watchVal[i]) {
+                const int64_t b = recBlock();
+                {   /* whole run: fires only when a watched word changes */
+                    fprintf(f, "M seq=%llu blk=%lld x:%#x %06x>%06x core=%u pc=%#x site=%s "
+                            "pc0=%#x pc1=%#x c1took=%u(%llu ago) e1=%llu rx1=%zu\n",
+                            (unsigned long long)seq, (long long)b, watchAddr[i],
+                            watchVal[i], v, k, pcBefore, kSiteName[site],
+                            g_chip.core[0].pc(), g_chip.core[1].pc(), lastTake1,
+                            (unsigned long long)(seq - lastTake1Seq),
+                            (unsigned long long)(execs[1] - e1AtTake2),
+                            g_chip.core[1].hdi().rxData().size());
+                }
+                watchVal[i] = v;
+            }
+        }
+    }
+    TWord *w = win();
+    if (!memcmp(w, shadow, sizeof shadow)) {
+        return;
+    }
+    const int64_t b = recBlock();
+    if (detail(b)) {
+        fprintf(f, "W seq=%llu blk=%lld core=%u pc=%#x->%#x site=%s ins=%llu",
+                (unsigned long long)seq, (long long)b, k, pcBefore, c.pc(),
+                kSiteName[site], (unsigned long long)ins(k));
+        unsigned n = 0;
+        for (unsigned i = 0; i < kWin; i++) {
+            if (w[i] != shadow[i] && n++ < 16) {
+                fprintf(f, " +%02x:%06x>%06x", i, shadow[i], w[i]);
+            }
+        }
+        fprintf(f, " n=%u\n", n);
+    }
+    if (k == 0 && post.live && !post.over &&
+        memcmp(w, post.snap, sizeof post.snap)) {
+        const unsigned cls = post.w == 2;
+
+        post.over = true;
+        fprintf(f, "O seq=%llu blk=%lld w=%u pc=%#x site=%s post_e0=%llu post_i0=%llu",
+                (unsigned long long)seq, (long long)b, post.w, pcBefore,
+                kSiteName[site], (unsigned long long)(execs[0] - post.e0),
+                (unsigned long long)(ins(0) - post.i0));
+        if (post.taken) {
+            const uint64_t me = execs[0] - post.te0, mi = ins(0) - post.ti0;
+
+            fprintf(f, " take_e0=%llu take_i0=%llu take_e1=%llu\n",
+                    (unsigned long long)me, (unsigned long long)mi,
+                    (unsigned long long)(execs[1] - post.te1));
+            mHistE[cls][bucket(me)]++;
+            mHistI[cls][bucket(mi)]++;
+            if (me < mMinE[cls]) mMinE[cls] = me;
+            if (mi < mMinI[cls]) mMinI[cls] = mi;
+        } else {
+            fprintf(f, " BEFORE-TAKE\n");
+            nOverFirst[cls]++;
+        }
+    }
+    memcpy(shadow, w, sizeof shadow);
+}
+
+void onIcc(unsigned core, bool send, TWord w)
+{
+    const int64_t b = recBlock();
+
+    if (send && core == 0) {
+        if (post.live && !post.taken) {
+            nUntaken[post.w == 2]++;
+            fprintf(f, "X seq=%llu blk=%lld untaken w=%u replaced by %u\n",
+                    (unsigned long long)seq, (long long)b, post.w, w);
+        }
+        post = Post();
+        post.live = true;
+        post.w = w;
+        post.seq = seq;
+        post.e0 = execs[0];
+        post.i0 = ins(0);
+        post.e1 = execs[1];
+        memcpy(post.snap, win(), sizeof post.snap);
+        nPost[w == 2]++;
+        if (detail(b)) {
+            fprintf(f, "P seq=%llu blk=%lld w=%u pc0=%#x pc1=%#x site=%s\n",
+                    (unsigned long long)seq, (long long)b, w,
+                    g_chip.core[0].pc(), g_chip.core[1].pc(), kSiteName[site]);
+        }
+        return;
+    }
+    if (!send && core == 1 && post.live && !post.taken) {
+        const unsigned cls = post.w == 2;
+        const TWord *now = win();
+        unsigned n = 0;
+
+        if (!dumped && b >= 0) {
+            dumped = true;
+            disasm(0, 0, 0x1fe0);
+            disasm(1, 0, 0x1da0);
+        }
+        lastTake1 = w;
+        lastTake1Seq = seq;
+        if (w == 2) {
+            e1AtTake2 = execs[1];
+        }
+        if (w < 2 && detail(b)) {
+            const TWord *x = g_chip.core[1].mem->getMemAreaPtr(MemArea_X)
+                             + (w ? 0x4000 : 0x2000);
+
+            fprintf(f, "R seq=%llu blk=%lld bank=%#x w30", (unsigned long long)seq,
+                    (long long)b, w ? 0x4000 : 0x2000);
+            for (unsigned sl = 0; sl < 8; sl++) {
+                fprintf(f, " %06x", x[sl * 0x20 + 30]);
+            }
+            fprintf(f, " t4");
+            for (unsigned i = 0; i < 32; i++) {
+                fprintf(f, " %06x", x[3 * 0x20 + i]);
+            }
+            fprintf(f, "\n");
+        }
+        post.taken = true;
+        post.te0 = execs[0];
+        post.ti0 = ins(0);
+        post.te1 = execs[1];
+        for (unsigned i = 0; i < kWin; i++) {
+            n += now[i] != post.snap[i];
+        }
+        if (n) {
+            nChanged[cls]++;
+        }
+        fprintf(f, "T seq=%llu blk=%lld w=%u got=%u exp_e0=%llu exp_i0=%llu exp_e1=%llu "
+                "changed=%u over=%d",
+                (unsigned long long)seq, (long long)b, post.w, w,
+                (unsigned long long)(execs[0] - post.e0),
+                (unsigned long long)(ins(0) - post.i0),
+                (unsigned long long)(execs[1] - post.e1), n, post.over ? 1 : 0);
+        for (unsigned i = 0, m = 0; i < kWin && m < 8; i++) {
+            if (now[i] != post.snap[i]) {
+                fprintf(f, " +%02x:%06x>%06x", i, post.snap[i], now[i]);
+                m++;
+            }
+        }
+        for (unsigned s = 0; s < S_N; s++) {
+            if (post.between[s][0] || post.between[s][1]) {
+                fprintf(f, " %s=%llu/%llu", kSiteName[s],
+                        (unsigned long long)post.between[s][0],
+                        (unsigned long long)post.between[s][1]);
+            }
+        }
+        fprintf(f, "\n");
+        return;
+    }
+    if (detail(b)) {
+        fprintf(f, "Q seq=%llu blk=%lld core=%u %s w=%u pc=%#x\n",
+                (unsigned long long)seq, (long long)b, core,
+                send ? "send" : "recv", w, g_chip.core[core].pc());
+    }
+}
+
+void onBlock()
+{
+    const int64_t b = recBlock();
+
+    fprintf(f, "B blk=%lld hatch=%llu", (long long)b, (unsigned long long)g_holdHatch);
+    for (unsigned s = 0; s < S_N; s++) {
+        if (blkExecs[s][0] || blkExecs[s][1]) {
+            fprintf(f, " %s=%llu/%llu", kSiteName[s],
+                    (unsigned long long)blkExecs[s][0],
+                    (unsigned long long)blkExecs[s][1]);
+        }
+    }
+    fprintf(f, "\n");
+    memset(blkExecs, 0, sizeof blkExecs);
+    fflush(f);
+}
+
+void summary()
+{
+    if (!f) {
+        return;
+    }
+    for (unsigned c = 0; c < 2; c++) {
+        fprintf(f, "S w=%s posts=%llu changed_at_take=%llu overwritten_before_take=%llu "
+                "untaken=%llu margin_min e0=%lld i0=%lld | e0hist",
+                c ? "2" : "0/1", (unsigned long long)nPost[c],
+                (unsigned long long)nChanged[c], (unsigned long long)nOverFirst[c],
+                (unsigned long long)nUntaken[c],
+                mMinE[c] == UINT64_MAX ? -1LL : (long long)mMinE[c],
+                mMinI[c] == UINT64_MAX ? -1LL : (long long)mMinI[c]);
+        for (unsigned i = 0; i < 24; i++) {
+            if (mHistE[c][i]) {
+                fprintf(f, " %u:%llu", 1u << i, (unsigned long long)mHistE[c][i]);
+            }
+        }
+        fprintf(f, " | i0hist");
+        for (unsigned i = 0; i < 24; i++) {
+            if (mHistI[c][i]) {
+                fprintf(f, " %u:%llu", 1u << i, (unsigned long long)mHistI[c][i]);
+            }
+        }
+        fprintf(f, "\n");
+    }
+    fclose(f);
+    f = nullptr;
+}
+
+void init()
+{
+    const char *e = getenv("OCTA_LONE_CORE");
+
+    g_loneCore = e && *e && *e != '0';
+    if (g_loneCore) {
+        fprintf(stderr, "octdsp: OCTA_LONE_CORE: cores step alone outside stepRound "
+                "(pre-74930ca, DIAG)\n");
+    }
+    const char *path = getenv("OCTA_HANDOFF_TRACE");
+    if (!path || !*path) {
+        return;
+    }
+    f = fopen(path, "w");
+    if (!f) {
+        fprintf(stderr, "octdsp: cannot open %s\n", path);
+        return;
+    }
+    setvbuf(f, nullptr, _IOFBF, 1 << 20);
+    if ((e = getenv("OCTA_HANDOFF_FROM"))) from = strtoll(e, nullptr, 0);
+    if ((e = getenv("OCTA_HANDOFF_TO")))   to = strtoll(e, nullptr, 0);
+    {
+        const char *wl = getenv("OCTA_HANDOFF_WATCH");
+        char *end;
+
+        if (!wl) {
+            wl = "207e,407e";
+        }
+        while (*wl && nWatch < 16) {
+            watchAddr[nWatch++] = (TWord)strtoul(wl, &end, 16) & 0x3ffff;
+            wl = *end == ',' ? end + 1 : end;
+            if (end == wl && *end != ',') {
+                break;
+            }
+        }
+    }
+    {
+        const char *pl = getenv("OCTA_HANDOFF_PCS");
+        char *end;
+
+        if (!pl) {
+            pl = "38b";
+        }
+        while (*pl && nPcs < 16) {
+            watchPc[nPcs++] = (TWord)strtoul(pl, &end, 16);
+            if (*end != ',') {
+                break;
+            }
+            pl = end + 1;
+        }
+    }
+    ot::g_execHook = onExec;
+    ot::g_iccHook = onIcc;
+    atexit(summary);
+    fprintf(stderr, "octdsp: OCTA_HANDOFF_TRACE=%s detail blocks %lld..%lld (DIAG)\n",
+            path, (long long)from, (long long)to);
+}
+
+} // namespace ht
+
 
 /*
  * How far one core runs before the other gets the host lock.
@@ -473,7 +889,9 @@ bool stepRound()
              * and time here is the instruction-driven ESAI clock. Running
              * the spin through the JIT costs a peripheral-callback read
              * per iteration — measured ~11 ms of a ~14 ms block wall. */
+            ht::site = ht::S_FF;
             c.fastForwardSlot();
+            ht::site = ht::S_ROUND;
             g_prodFF++;
             ran = true;
         } else if (&c != &codec && ot::atMailboxWait(c.pc()) &&
@@ -586,6 +1004,9 @@ void closeBlock()
             b++;
         }
         g_blockHist[b]++;
+    }
+    if (ht::f) {
+        ht::onBlock();
     }
 
     if (g_exitWithFrontend && g_hadFrontend && g_client < 0) {
@@ -760,8 +1181,23 @@ void shutdownAudio()
  * kCoreSlice). The peer is skipped where stepRound would hold it: not
  * runnable, or the codec with an unread published word.
  */
-void stepPair(ot::Core &c, unsigned n)
+void stepPair(ot::Core &c, unsigned n, int site)
 {
+    const int prev = ht::site;
+
+    ht::site = site;
+    if (ht::f && ht::detail(ht::recBlock())) {
+        ot::Core &o = g_chip.core[c.index ^ 1];
+        fprintf(ht::f, "L seq=%llu blk=%lld site=%s core=%u n=%u pc=%#x peer_pc=%#x%s\n",
+                (unsigned long long)ht::seq, (long long)ht::recBlock(),
+                ht::kSiteName[site], c.index, n, c.pc(), o.pc(),
+                g_loneCore ? " lone" : "");
+    }
+    if (g_loneCore) {                   /* DIAG: the pre-74930ca stepping */
+        c.step(n);
+        ht::site = prev;
+        return;
+    }
     for (unsigned k = 0; k < n; k += kCoreSlice) {
         c.step(kCoreSlice);
         for (auto &o : g_chip.core) {
@@ -781,11 +1217,12 @@ void stepPair(ot::Core &c, unsigned n)
             o.step(kCoreSlice);
         }
     }
+    ht::site = prev;
 }
 
 ot::StepFn drainStep(ot::Core &c)
 {
-    return [&c] { stepPair(c, 64); };
+    return [&c] { stepPair(c, 64, ht::S_DRAIN); };
 }
 
 } // namespace
@@ -819,6 +1256,7 @@ void ot_dspcore_init(const char *audio_path, int throttle, uint32_t interleave,
         g_in.pushBlock(z);                  /* input for the very first block */
     }
     audioListen(audio_path);
+    ht::init();
     g_blkT0 = g_deadline = std::chrono::steady_clock::now();
     atexit(shutdownAudio);
 }
@@ -899,6 +1337,7 @@ void ot_dspcore_write(unsigned idx, uint32_t w)
     /* Argument words are never run over: a still-armed host-receive DMA
      * channel would eat them ahead of the command handler. */
     if (s.argPhase < 2) {
+        ht::host(idx, "arg", w & 0xFFFFFF, s.argPhase);
         if (s.argPhase == 0) {
             s.lastDest = w & 0xFFFF;
         }
@@ -907,7 +1346,7 @@ void ot_dspcore_write(unsigned idx, uint32_t w)
     for (unsigned g = 0;
          g < 100000 && c.hdi().rxData().size() >= ot::kFifoDepth && !c.dead; g++) {
         s.writeStalls++;
-        stepPair(c, 256);
+        stepPair(c, 256, ht::S_WSTALL);
     }
     TWord word = w & 0xFFFFFF;
     c.hdi().writeRX(&word, 1);
@@ -939,7 +1378,7 @@ uint32_t ot_dspcore_rx_pop(unsigned idx)
          * request-paced supply, without a per-word thread round trip. */
         c.periphX.getDMA().trigger(DmaChannel::RequestSource::HostTransmitData);
         if (!c.hdi().hasTX()) {
-            stepPair(c, 64);
+            stepPair(c, 64, ht::S_RXPOP);
         }
         if (!c.hdi().hasTX()) {
             s.popStale++;
@@ -964,6 +1403,7 @@ void ot_dspcore_icr(unsigned idx, unsigned val)
     }
     s.argPhase = 0;
     s.icrResets++;
+    ht::host(idx, "icr", val, 0);
     if (!ot::portIcrReset(c, drainStep(c))) {
         s.icrTimeouts++;
     }
@@ -976,6 +1416,7 @@ void ot_dspcore_cvr(unsigned idx, unsigned val)
     ot::Core &c = *s.c;
 
     s.commands++;
+    ht::host(idx, "cvr", val, 0);
     if (!c.runnable()) {
         return;
     }
@@ -1003,11 +1444,21 @@ void ot_dspcore_write_burst(unsigned idx, uint32_t txh,
         g_sumExecs = codecCore().execs;
     }
     s.wordsIn += halves;
+    ht::host(idx, "burst", s.lastDest, halves);
     while (halves) {
         unsigned n = halves > 1024 ? 1024 : halves;
 
         for (unsigned i = 0; i < n; i++) {
             w[i] = (txh << 16) | ((TWord)be[2 * i] << 8) | be[2 * i + 1];
+        }
+        if (ht::f && ht::detail(ht::recBlock())) {
+            for (unsigned i = 0; i < n; i++) {
+                if ((w[i] & 0xFFFFF0) == 0x0301d0) {
+                    fprintf(ht::f, "S1 seq=%llu blk=%lld core=%u dest=%#x off=%u of %u %06x\n",
+                            (unsigned long long)ht::seq, (long long)ht::recBlock(),
+                            idx, s.lastDest, i, n, w[i]);
+                }
+            }
         }
         /* Drain a full FIFO inline, stepping BOTH cores: the mailbox coupling
          * wedges if only the receiver runs. */
@@ -1015,7 +1466,18 @@ void ot_dspcore_write_burst(unsigned idx, uint32_t txh,
              g < 100000 && c.hdi().rxData().size() >= ot::kFifoDepth && !c.dead;
              g++) {
             s.writeStalls++;
-            stepPair(c, 256);
+            if (g_loneCore) {           /* DIAG: exactly the pre-74930ca stall */
+                ht::site = ht::S_WBURST;
+                c.step(256);
+                for (auto &o : g_chip.core) {
+                    if (&o != &c) {
+                        o.step(64);
+                    }
+                }
+                ht::site = ht::S_ROUND;
+            } else {
+                stepPair(c, 256, ht::S_WBURST);
+            }
         }
         c.hdi().writeRX(w, n);
         be += 2 * n;
@@ -1034,7 +1496,7 @@ void ot_dspcore_read_burst(unsigned idx, uint8_t *be, unsigned halves)
         if (!c.hdi().hasTX() && c.hostTxArmed()) {
             c.periphX.getDMA().trigger(DmaChannel::RequestSource::HostTransmitData);
             if (!c.hdi().hasTX()) {
-                stepPair(c, 64);
+                stepPair(c, 64, ht::S_RBURST);
             }
         }
         if (c.hdi().hasTX()) {

@@ -13,6 +13,8 @@ using namespace dsp56k;
 namespace ot {
 
 Icc g_icc;
+void (*g_execHook)(Core &, TWord) = nullptr;
+void (*g_iccHook)(unsigned, bool, TWord) = nullptr;
 
 void Icc::send(unsigned from, TWord w)
 {
@@ -43,7 +45,12 @@ TWord PeriphY::read(TWord addr, Instruction)
 {
     switch (addr) {
     case 0xffffd3: return g_icc.rxFull(m_index) ? kFlag : 0;
-    case 0xffffd4: return g_icc.receive(m_index);
+    case 0xffffd4: {
+        const TWord w = g_icc.receive(m_index);
+        if (g_iccHook)
+            g_iccHook(m_index, false, w);
+        return w;
+    }
     case 0xffffd6: return g_icc.txPending(m_index) ? kFlag : 0;
     default:       return m_mem[addr & 0x7F];
     }
@@ -53,6 +60,8 @@ void PeriphY::write(TWord addr, TWord v)
 {
     if (addr == 0xffffd7) {
         g_icc.send(m_index, v & 0xFFFFFF);
+        if (g_iccHook)
+            g_iccHook(m_index, true, v & 0xFFFFFF);
         return;
     }
     m_mem[addr & 0x7F] = v & 0xFFFFFF;
@@ -165,7 +174,13 @@ bool Core::step(unsigned n)
                     index, dsp->getPC().toWord());
             return false;
         }
-        dsp->exec();
+        if (g_execHook) {
+            const TWord p = dsp->getPC().toWord();
+            dsp->exec();
+            g_execHook(*this, p);
+        } else {
+            dsp->exec();
+        }
     }
     return true;
 }

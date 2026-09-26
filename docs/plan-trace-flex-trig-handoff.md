@@ -1,6 +1,7 @@
 # Plan: trace the lost FLEX-trig handoff between the two DSP cores
 
-Status: plan, not started (written 2026-09-25). Background: `docs/PERF-NOTES.md`, "Dropped FLEX trigs:
+Status: done 2026-09-25, see PERF-NOTES "Traced (2026-09-25)". The switches are named OCTA_LONE_CORE /
+OCTA_HANDOFF_TRACE (the board's OCTA_ convention), not OCTEMU_. Written 2026-09-25. Background: `docs/PERF-NOTES.md`, "Dropped FLEX trigs:
 ROOT-CAUSED AND FIXED" (lines ~79-125) and the investigation history (lines ~318-406); `.wolf/buglog.json`
 bug-021 (wrong theory) and bug-025 (real cause).
 

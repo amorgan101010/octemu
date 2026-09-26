@@ -73,6 +73,13 @@ struct Icc {
 };
 extern Icc g_icc;
 
+struct Core;
+/* DIAG hooks, null unless a tracer installs them (the shim's
+ * OCTA_HANDOFF_TRACE). g_execHook runs after every exec with the PC the exec
+ * started at; g_iccHook on every mailbox post (send) and take (!send). */
+extern void (*g_execHook)(Core &c, TWord pcBefore);
+extern void (*g_iccHook)(unsigned core, bool send, TWord w);
+
 class PeriphY final : public dsp56k::IPeripherals {
 public:
     PeriphY() : IPeripherals(dsp56k::PeripheralType::PeripheralsNop) {}

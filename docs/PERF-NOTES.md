@@ -93,6 +93,104 @@ skipped where stepRound wouldn't step it. 0 drops in 1680+ beats (512, 1024,
 and with 0017). ~2% cost. **Please apply it on macOS too** (it's in
 `src/board/ot-dsp-shim.cc`, portable) and run `tests/trig8-repro.sh`.
 
+### Traced (2026-09-25): which handoff, and how much margin stepPair leaves
+
+Plan: `docs/plan-trace-flex-trig-handoff.md`. Tools: `OCTA_LONE_CORE=1`
+restores the pre-74930ca stepping. `OCTA_HANDOFF_TRACE=file` (with
+`OCTA_HANDOFF_FROM`/`_TO` in recording blocks, `OCTA_HANDOFF_WATCH` and
+`OCTA_HANDOFF_PCS`) logs the handoffs; the line types are documented in
+`ot-dsp-shim.cc`. Both are off by default. With neither set: test-dsp,
+test-dsp-metro and test-emu pass, and an 8-run trig8 batch shows 0 drops
+(runs are not bit-reproducible: two unset runs of one binary give different
+WAV hashes). At current `linux` (0017 in, INTC fix, guest timers),
+`OCTA_LONE_CORE=1` still drops [9, 17, 25, ... 81] at interleave 512 and
+1024. Tracing does not move the drops, and hatch=0 in every run.
+
+**The plan's hypothesis (the shared window) is a real race, but it is not the
+FLEX one.** The disassembly (the trace dumps both payloads) shows the
+protocol:
+
+- core 0: P:0x74 posts the bank index. P:0xa3 waits until core 1 has taken
+  it. P:0xa5 copies the window to y:$1b8. P:0xb0-0xe5 writes the new window.
+  P:0xe6 posts the 2.
+- core 1: P:0x91 takes the 2. P:0x94-0xb2 reads the window, including the
+  click flag at +$44.
+- **core 0 then clears window words +00..03 and +44..47 at P:0x370**, later
+  in the same block. That clear is the "overwrite" the kCoreSlice comment
+  describes: consume-once control words.
+
+| window handoff | core 1 reads after the P:0x370 clear | margin, take to clear |
+|---|---|---|
+| stepPair | 0 of 160,990 blocks | min 115 core-0 execs / 3930 insns, all in 64-127 |
+| lone | 160,965 of 160,971 blocks | none (exposure 135 execs, ~119 of them core-0-alone drains) |
+
+The margin is about 7x kCoreSlice (16). The bank-index handoff is guarded by
+the P:0xa3 poll, not by timing. In this project the window contents are the
+same in every block, trig or not, so losing them cannot select every 8th
+beat. It is the likely mechanism behind the old metronome bug the kCoreSlice
+comment describes (the click flag at +$44 is in the cleared range). That is
+inferred from the flag's address: no traced run had the metronome on, and
+test-dsp-metro passes.
+
+**The FLEX handoff is the ColdFire's per-block track record to core 1.**
+Host command 0x88 delivers the record into core 1's ping-pong bank X:$2000 or
+X:$4000 (T4 = slot 3; word 30 = the gate/strobe that `voice_note_gate` tests).
+Core 1 picks the bank from the mailbox bank index. The ColdFire sends the same
+words in both modes, e.g. `00e` -> strobe `1d0` -> `040`. What differs is
+where each landing falls against core 1's bank-index takes. A landing is
+*in-render* if the last take chose that bank (core 1 is rendering it and the
+record arrives mid-render), and *ahead* if the last take chose the other bank
+(the record waits for the next block). Whole-run write-watch on X:$207e/$407e,
+e1 = core-1 execs since core 1 took the 2:
+
+| T4 gate-word landings, one full run | in-render | ahead |
+|---|---|---|
+| stepPair | 505 (e1 0-199) | 5 (boot and outliers) |
+| lone | 111 (e1 100-199) | 397 (e1 1100-1250) |
+
+stepPair keeps one regime. Lone stepping lets the landings switch between the
+two. **A beat drops exactly when that switch falls between the strobe record
+and the record after it**: the strobe lands ahead (e1 = 1113) and the
+follow-up lands in-render (e1 = 121). Checked beat by beat against the trig8
+scorer (`work/trig8/ho/flip.py`): 84/84 in a lone run (10 flips = the 10
+drops, [9, 17, ... 81]) and 84/84 in a stepPair run (0 flips, 0 drops). So
+the pair of records that frames the attack is split across core 1's block
+boundary, and the sustain is cut. The attack itself renders.
+
+Still inferred, not traced: which render read of word 30 turns the split into
+the release, and why the in-block phase decides where the switch falls. The
+render reads word 30 from per-frame copies (x:$208 -> x:$25d + k*$20, 3 reads
+per block on a rotating slot set), not from the bank. Tracing that copy is the
+next step if it matters. No margin is measured for this handoff, because the
+consuming read is not identified. Its safety under stepPair is empirical:
+0 drops in 672 beats here and 1680+ before.
+
+**Audit of the paths where one core runs without the other** (current code;
+every step goes through `stepRound` or `stepPair`, and the drains, stalls, pops
+and bursts all go through `stepPair`). The two handoffs need opposite things,
+so each path is judged for both:
+
+- *core 0 alone*: only while core 1 is parked at its mailbox wait with
+  nothing posted (`stepRound`, and `stepPair`'s identical skip). Window: safe
+  by a measured margin, since core 1 resumes within one slice of the post: 16
+  execs against at least 115. Record: core 0 alone does not move core 1
+  against the ColdFire.
+- *core 1 alone*: while the codec is frozen (unread TX word), held (delivery
+  hold, up to the 250 ms `kDeliveryHold` escape), or parked at the block poll.
+  Window: safe, because core 1 can only reach its own read earlier. Record:
+  this is exactly the direction that could make core 1 read before a landing.
+  But stepPair runs have it too (their core-1 drain steps run with core 0
+  parked at 0x4f), and they keep one regime and drop nothing. Empirically
+  safe, with no margin measured. The escape itself steps nothing; it releases
+  the hold.
+- `fastForwardSlot`'s `step(8)` runs inside a `stepRound` round, whose other
+  half steps core 1.
+- octdsp (`dsp-main.cc`) steps its cores itself, one exec at a time, and is
+  not affected.
+
+Open: the tracing hooks add a null-pointer test to `Core::step`'s per-exec
+loop. Run a `scripts/bench.sh` A/B before relying on "no cost".
+
 ~~**0017 still stays out**~~ **RESOLVED, 0017 is back**: see "0017 is back:
 its load penalty was LOST INTERRUPTS" above. History: it made project
 loading ~3x slower. Investigated (diagnostics below):
