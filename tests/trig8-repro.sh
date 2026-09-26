@@ -6,6 +6,7 @@
 #   OCTEMU_QEMU=/path/qemu tests/trig8-repro.sh label    another QEMU binary
 #   OCTEMU_ARGS="--interleave 1024" tests/trig8-repro.sh label
 #   FX=dir WALK=file tests/trig8-repro.sh label   another fixture / walk
+#   TIMEOUT=1200 tests/trig8-repro.sh label     wall seconds (default 580)
 #                                                (tests/trigsweep.sh uses these)
 #
 # The fixture (tests/fixtures/trig8/) is a real user project: a set with a
@@ -36,7 +37,7 @@ gzip -dc "$FX/nvram.bin.gz" > "$W/nvram.bin"
 
 ./octemu --headless --read-only --cf-card "$W/card.img" --nvram "$W/nvram.bin" \
     ${OCTEMU_ARGS:-} --script "$WALK" --recording "$W/out.wav" \
-    --timeout 580 > "$W/log" 2>&1 || { echo "$LABEL: run failed"; tail -5 "$W/log"; exit 2; }
+    --timeout "${TIMEOUT:-580}" > "$W/log" 2>&1 || { echo "$LABEL: run failed"; tail -5 "$W/log"; exit 2; }
 blk=$(grep -ao '\[mark\] blk=[0-9]* [0-9]* play' "$W/log" | grep -o 'blk=[0-9]*' | cut -d= -f2)
 [ -n "$blk" ] || { echo "$LABEL: no play mark"; exit 2; }
 mkdir -p out && cp "$W/out.wav" "out/trig8-$LABEL.wav" && cp "$W/log" "out/trig8-$LABEL.log"

@@ -6,6 +6,7 @@
 #   P=2 tests/trigsweep.sh ...               runs in parallel (default 2)
 #   OCTEMU_QEMU=/path/qemu tests/trigsweep.sh ...   another binary
 #   OCTA_SLICE_MATCH=1 / OCTA_LONE_CORE=1 tests/trigsweep.sh ...  stepping modes
+#   TIMEOUT=1200 tests/trigsweep.sh ...      per-run wall limit (a slow host)
 #
 # Each case solos one track of tests/fixtures/trigsweep (the user's TESTDROPOUT
 # project: 8 FLEX tracks trigging every 16th, comb filter on T1 FX2, Neighbor
@@ -36,12 +37,14 @@ command -v ionice >/dev/null && LOW="$LOW ionice -c3"
 
 run() {
     local c=$1 l="sweep-$LABEL-$1" b s
+    mkdir -p out
+    rm -f "out/trig8-$l.log" "out/trig8-$l.wav"   # a failed rerun must not score the last run
     FX=tests/fixtures/trigsweep WALK="$W/$c.jsonl" $LOW tests/trig8-repro.sh "$l" \
-        > /dev/null 2>&1
+        > "out/trig8-$l.out" 2>&1
     b=$(grep -ao '\[mark\] blk=[0-9]* [0-9]* play' "out/trig8-$l.log" 2>/dev/null \
         | grep -o 'blk=[0-9]*' | cut -d= -f2)
     if [ -z "$b" ]; then
-        echo "$c: RUN FAILED (see out/trig8-$l.log)"
+        echo "$c: RUN FAILED: $(tail -1 "out/trig8-$l.out")"
         return
     fi
     s=$(python3 tests/trig8-body.py "out/trig8-$l.wav" "$b" | head -1)

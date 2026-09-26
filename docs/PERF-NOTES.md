@@ -246,6 +246,21 @@ drop in this project. `OCTA_SLICE_INS=N` (both cores N instructions) is a
 diagnostic only: 585 is clean, but 256 breaks trig8 at a new phase, because
 it also slows the codec.
 
+**macOS (M1 Air, LTO+PGO build of e86b20b), step 0: reproduced.**
+
+| trigsweep, `TIMEOUT=1200` | shipped | OCTA_SLICE_MATCH=1 | OCTA_LONE_CORE=1 |
+|---|---|---|---|
+| q12 | drops [9, 17, ... 81] | clean | drops [9, 17, ... 81] (+ [2, 10, ... 82] in one loaded run; rerun pending) |
+| q3, q4 | clean | clean | drops [9, 17, ... 81] |
+| q1 (silent), q2, q5-q8 | clean | clean | clean |
+
+Every accepted run has hatch=0. On the Mac a trigsweep run is ~357 guest
+seconds, so the old fixed `--timeout 580` failed runs as "RUN FAILED" once
+two niced runs shared an 8 GB machine that was swapping; `TIMEOUT` now
+overrides it, and trigsweep keeps each run's output in `out/trig8-LABEL.out`.
+A matched run under that load was late for 98% of its blocks (shipped: 8%):
+see the cost step.
+
 **Still to do before it can ship** (plan: `docs/plan-validate-slice-match.md`):
 project-load time, a `bench.sh` A/B, the margin on the guest-instruction clock
 (`scripts/diag/handoff-margin.py`), and a machine/FX combo sweep, especially
