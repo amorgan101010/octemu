@@ -22,6 +22,14 @@ old setup. The user's projects were never part-saved: their parts 5-8 are
 blank, so even an empty setting list changes the fixture (the "mirrored"
 control).
 
+The NVRAM matters as much as the card: it holds the firmware's working copy
+of the open bank, and the firmware boots from that copy, not from the card's
+bank file (edits to the card alone change nothing: measured, T2 set to Flex
+still played as a Neighbor). So every edit goes to both. In the NVRAM, part p
+(RAM layout, the file's record without its 9-byte header) sits at 0xa4ece +
+p * 0x18b2 and pattern A01's track t at 0x1614e + t * 0x91a. Those addresses
+are checked against the unedited bank file before anything is written.
+
 Stress is for the tracks a walk mutes (muted tracks keep trigging and their
 FX keep running): locks and LFOs change the per-block track records that
 bug-031's late transfer carries. Keep it off the scored track and anything
@@ -41,6 +49,7 @@ projects were built with, and the trig masks read 0xffff (every 16th) and
 0x1111 (quarters) as the walks expect. Other FX ids follow the stock FX list
 and are unverified until a variant using them is load-checked.
 """
+import gzip
 import pathlib
 import shutil
 import sys
@@ -54,6 +63,8 @@ FX1_OFF, FX2_OFF, TYPE_OFF = 0x09, 0x11, 0x2b
 FLEX_SLOT, LFO_P1, LFO_SETUP = 0x2d4, 0x123, 0x2fb
 TRAC0, PTRN_STRIDE, TRAC_STRIDE = 0x16 + 8 + 9, 0x8eec, 0x922   # pattern A01 data
 LOCKS, LOCK_LEN = 0x59, 32
+NV_PART, NV_PART_STRIDE, NV_TRAC, NV_TRAC_STRIDE = 0xa4ece, 0x18b2, 0x1614e, 0x91a
+PART_DATA, TRAC_DATA = PART_STRIDE - 9, TRAC_STRIDE - 9
 LOCK_SLOTS = (0, 3, 6, 7, 9, 10, 15, 16, 18, 19, 20, 21, 22, 23, 24)
 TYPES = {'static': 0, 'flex': 1, 'thru': 2, 'neighbor': 3, 'pickup': 4}
 FX = {'none': 0x00, 'filter': 0x04, 'spatializer': 0x05, 'delay': 0x08,
@@ -135,6 +146,23 @@ def edit(path, edits):
             assert back[trac + LOCKS + 15 * LOCK_LEN + 24] != 0xff
 
 
+def nv_regions():
+    """(file offset, NVRAM offset, length) of every bank region the NVRAM mirrors."""
+    for p in range(2 * NPARTS):
+        yield PART_BASE + p * PART_STRIDE + 9, NV_PART + p * NV_PART_STRIDE, PART_DATA
+    for t in range(8):
+        yield TRAC0 + t * TRAC_STRIDE, NV_TRAC + t * NV_TRAC_STRIDE, TRAC_DATA
+
+
+def sync_nvram(nv, before, after):
+    """Copy the edited bank into the NVRAM's working copy, after checking
+    that the NVRAM held exactly the unedited bank at every mapped address."""
+    for f, n, ln in nv_regions():
+        if nv[n:n + ln] != before[f:f + ln]:
+            sys.exit(f'NVRAM {n:#x} does not mirror bank offset {f:#x}: layout unknown, not writing')
+        nv[n:n + ln] = after[f:f + ln]
+
+
 def main():
     args = sys.argv[1:]
     fixture = 'trigsweep'
@@ -152,12 +180,16 @@ def main():
         banks = sorted(tmp.glob(f'*/{FIXTURES[fixture]}/bank01.*'))
         if len(banks) != 2:
             sys.exit(f'expected bank01.work and .strd, found {banks}')
+        work = [b for b in banks if b.suffix == '.work'][0]
+        before = work.read_bytes()
         for b in banks:
             edit(b, edits)
+        nv = bytearray(gzip.decompress((src / 'nvram.bin.gz').read_bytes()))
+        sync_nvram(nv, before, work.read_bytes())
         (sset,) = [p for p in tmp.iterdir() if p.is_dir()]
         with tarfile.open(out / 'set.tgz', 'w:gz') as tf:
             tf.add(sset, arcname=sset.name)
-    shutil.copy(src / 'nvram.bin.gz', out / 'nvram.bin.gz')
+    (out / 'nvram.bin.gz').write_bytes(gzip.compress(bytes(nv)))
     if (src / 'walk.jsonl').exists():
         shutil.copy(src / 'walk.jsonl', out / 'walk.jsonl')
     (out / 'VARIANT').write_text(' '.join(sys.argv[1:]) + '\n')
