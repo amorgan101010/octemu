@@ -218,6 +218,16 @@ static bool parse(const char *line, Step *s)
         buf[0] = 0;
     }
     snprintf(s->arg, sizeof s->arg, "%s", buf);
+    /* ☠ An unknown key name used to be sent as key -1, i.e. silently
+     * dropped: the trig8 fixture tapped "T1".."T8" (the keys are TRACK1..8)
+     * for its whole life, so its "mute every track but T4" never muted
+     * anything. Fail the walk instead. */
+    if ((s->action == A_TAP || s->action == A_PRESS ||
+         s->action == A_RELEASE) && panel_button_id(buf) < 0) {
+        fprintf(stderr, "octemu: script: unknown key \"%s\" (see src/panel.c)\n",
+                buf);
+        return false;
+    }
 
     if (json_str(line, "wait_text", s->text, sizeof s->text) ||
         json_str(line, "until", s->text, sizeof s->text)) {

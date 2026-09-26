@@ -334,7 +334,18 @@ builds a fresh 256 MiB card, boots headless `--read-only`, waits out LOADING
 FILES, mutes T1-T3/T5-T8, PLAYs, records 40 s (`--recording`, sample-exact,
 no audio device), and `tests/trig8-body.py` scores each beat's sustained body
 (RMS 75-175 ms after the beat, flagged below 50% of median). Clean:
-`drops at beats []`, exit 0. The bug: `[9, 17, 25, ...]`, exit 1. The WAV is
+`drops at beats []`, exit 0. The bug: `[9, 17, 25, ...]`, exit 1.
+**Correction (2026-09-25):** until then the walk tapped `T1`..`T8`, which are
+not key names (the keys are `TRACK1`..`TRACK8`), and the script runner
+silently dropped unknown keys. So no track was ever muted: every trig8 run
+above played the whole project, and T1, heard through its neighbor on T2,
+was in the mix. T4 dominates the mix, so the drop results stand. Fixed: the
+walk now mutes, and an unknown key fails the walk (`src/script.c`). FUNC +
+track TOGGLES a mute: T3 is saved muted in this project, so the walk leaves
+it alone (tapping it would unmute T3's reverbed noise). With T4 really alone
+the median body is ~2233 instead of ~2281. The shipped build still
+scores `[]`, and `OCTA_LONE_CORE=1` (branch `diag/handoff-trace`) still drops
+[9, 17, ... 81]. The WAV is
 kept at `out/trig8-<label>.wav`. ~60 s per run on the 5600G.
 
 ### What the investigation found (after the bisect below)
