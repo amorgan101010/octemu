@@ -414,7 +414,7 @@ constexpr auto kDeliveryHold = std::chrono::milliseconds(250);
  *      commands, argument words (the transfer's dest), write bursts
  *   R  core 1 takes a bank index (detail range only): the bank it will render
  *      from, word 30 (the gate/strobe) of all 8 slots, and slot 3 (T4) whole
- *   B  per block: execs by call site and core
+ *   B  per block: instructions and execs per core, execs by call site and core
  *   M  a watched X word changed (whole run): OCTA_HANDOFF_WATCH is
  *      a comma list of hex X addresses on core 1 (default 207e,407e: word 30
  *      of slot 3 in both record banks); logs the exec's core, PC and site —
@@ -430,6 +430,9 @@ constexpr auto kDeliveryHold = std::chrono::milliseconds(250);
  * straight from a trig8 log. -1 before the frontend attaches.
  */
 bool g_loneCore = false;
+unsigned g_sliceIns = 0;           /* OCTA_SLICE_INS, see sliceStep */
+bool g_sliceMatch = false;         /* OCTA_SLICE_MATCH, see stepIns */
+uint64_t g_lastSliceIns = 0;
 
 namespace ht {
 
@@ -546,13 +549,15 @@ void onExec(ot::Core &c, TWord pcBefore)
                 const int64_t b = recBlock();
                 {   /* whole run: fires only when a watched word changes */
                     fprintf(f, "M seq=%llu blk=%lld x:%#x %06x>%06x core=%u pc=%#x site=%s "
-                            "pc0=%#x pc1=%#x c1took=%u(%llu ago) e1=%llu rx1=%zu\n",
+                            "pc0=%#x pc1=%#x c1took=%u(%llu ago) e1=%llu rx1=%zu i0=%llu g=%llu\n",
                             (unsigned long long)seq, (long long)b, watchAddr[i],
                             watchVal[i], v, k, pcBefore, kSiteName[site],
                             g_chip.core[0].pc(), g_chip.core[1].pc(), lastTake1,
                             (unsigned long long)(seq - lastTake1Seq),
                             (unsigned long long)(execs[1] - e1AtTake2),
-                            g_chip.core[1].hdi().rxData().size());
+                            g_chip.core[1].hdi().rxData().size(),
+                            (unsigned long long)ins(0),
+                            (unsigned long long)ot_guest_insn());
                 }
                 watchVal[i] = v;
             }
@@ -668,9 +673,10 @@ void onIcc(unsigned core, bool send, TWord w)
         if (n) {
             nChanged[cls]++;
         }
-        fprintf(f, "T seq=%llu blk=%lld w=%u got=%u exp_e0=%llu exp_i0=%llu exp_e1=%llu "
+        fprintf(f, "T seq=%llu blk=%lld w=%u got=%u g=%llu i0=%llu exp_e0=%llu exp_i0=%llu exp_e1=%llu "
                 "changed=%u over=%d",
                 (unsigned long long)seq, (long long)b, post.w, w,
+                (unsigned long long)ot_guest_insn(), (unsigned long long)ins(0),
                 (unsigned long long)(execs[0] - post.e0),
                 (unsigned long long)(ins(0) - post.i0),
                 (unsigned long long)(execs[1] - post.e1), n, post.over ? 1 : 0);
@@ -701,7 +707,17 @@ void onBlock()
 {
     const int64_t b = recBlock();
 
-    fprintf(f, "B blk=%lld hatch=%llu", (long long)b, (unsigned long long)g_holdHatch);
+    static uint64_t lastIns[2], lastEx[2];
+    const uint64_t i0 = ins(0), i1 = ins(1);
+    fprintf(f, "B blk=%lld hatch=%llu ins=%llu/%llu ex=%llu/%llu", (long long)b,
+            (unsigned long long)g_holdHatch,
+            (unsigned long long)(i0 - lastIns[0]), (unsigned long long)(i1 - lastIns[1]),
+            (unsigned long long)(execs[0] - lastEx[0]),
+            (unsigned long long)(execs[1] - lastEx[1]));
+    lastIns[0] = i0;
+    lastIns[1] = i1;
+    lastEx[0] = execs[0];
+    lastEx[1] = execs[1];
     for (unsigned s = 0; s < S_N; s++) {
         if (blkExecs[s][0] || blkExecs[s][1]) {
             fprintf(f, " %s=%llu/%llu", kSiteName[s],
@@ -749,6 +765,15 @@ void init()
     const char *e = getenv("OCTA_LONE_CORE");
 
     g_loneCore = e && *e && *e != '0';
+    if ((e = getenv("OCTA_SLICE_MATCH")) && *e && *e != '0') {
+        g_sliceMatch = true;
+        fprintf(stderr, "octdsp: OCTA_SLICE_MATCH: peer slices match instructions (EXPERIMENT)\n");
+    }
+    if ((e = getenv("OCTA_SLICE_INS")) && atoi(e) > 0) {
+        g_sliceIns = (unsigned)atoi(e);
+        fprintf(stderr, "octdsp: OCTA_SLICE_INS=%u: slices in instructions (EXPERIMENT)\n",
+                g_sliceIns);
+    }
     if (g_loneCore) {
         fprintf(stderr, "octdsp: OCTA_LONE_CORE: cores step alone outside stepRound "
                 "(pre-74930ca, DIAG)\n");
@@ -819,6 +844,36 @@ void init()
  * click arrives a handful of times in a 30 s run, at 16 it arrives on the beat.
  */
 constexpr unsigned kCoreSlice = 16;
+/*
+ * EXPERIMENT (OCTA_SLICE_INS=N): a slice of N retired INSTRUCTIONS instead of
+ * kCoreSlice JIT blocks. Both cores share one clock on silicon, but a JIT block
+ * is 36 instructions on the codec and 14-24 on core 1, so equal block counts
+ * run core 1 at about half the codec's rate. 0 = off (JIT blocks).
+ */
+/* EXPERIMENT (OCTA_SLICE_MATCH=1): the peer of a slice gets exactly the
+ * instructions its partner just retired (the codec keeps kCoreSlice JIT blocks,
+ * so its pace and the calibrated ColdFire:DSP ratio are unchanged), because the
+ * two cores share one clock on silicon. */
+void stepIns(ot::Core &c, uint64_t n)
+{
+    const uint64_t t = c.dsp->getInstructionCounter() + n;
+    for (unsigned g = 0; g < 8192 && c.runnable() &&
+                         c.dsp->getInstructionCounter() < t; g++) {
+        c.step(1);
+    }
+}
+void sliceStep(ot::Core &c)
+{
+    if (!g_sliceIns) {
+        c.step(kCoreSlice);
+        return;
+    }
+    const uint64_t t = c.dsp->getInstructionCounter() + g_sliceIns;
+    for (unsigned g = 0; g < 4096 && c.runnable() &&
+                         c.dsp->getInstructionCounter() < t; g++) {
+        c.step(1);
+    }
+}
 
 /*
  * ONE PASS over both cores: the whole of the chip's turn-taking. Returns
@@ -890,7 +945,11 @@ bool stepRound()
              * the spin through the JIT costs a peripheral-callback read
              * per iteration — measured ~11 ms of a ~14 ms block wall. */
             ht::site = ht::S_FF;
-            c.fastForwardSlot();
+            {
+                const uint64_t i0 = c.dsp->getInstructionCounter();
+                c.fastForwardSlot();
+                g_lastSliceIns = c.dsp->getInstructionCounter() - i0;
+            }
             ht::site = ht::S_ROUND;
             g_prodFF++;
             ran = true;
@@ -900,8 +959,13 @@ bool stepRound()
              * ☠ Do NOT generalise this to "the PC did not change": DSP
              * rep/do loops hold one PC while doing real work, and a
              * generic PC-repeat park wedges the boot. */
+        } else if (g_sliceMatch && &c != &codec) {
+            stepIns(c, g_lastSliceIns);
+            ran = true;
         } else {
-            c.step(kCoreSlice);
+            const uint64_t i0 = c.dsp->getInstructionCounter();
+            sliceStep(c);
+            g_lastSliceIns = c.dsp->getInstructionCounter() - i0;
             ran = true;
         }
     }
@@ -1199,7 +1263,9 @@ void stepPair(ot::Core &c, unsigned n, int site)
         return;
     }
     for (unsigned k = 0; k < n; k += kCoreSlice) {
-        c.step(kCoreSlice);
+        const uint64_t ci0 = c.dsp->getInstructionCounter();
+        sliceStep(c);
+        const uint64_t cdone = c.dsp->getInstructionCounter() - ci0;
         for (auto &o : g_chip.core) {
             if (&o == &c || !o.runnable()) {
                 continue;
@@ -1214,7 +1280,11 @@ void stepPair(ot::Core &c, unsigned n, int site)
             } else if (ot::atMailboxWait(o.pc()) && !ot::g_icc.rxFull(1)) {
                 continue;               /* core 1 idle at its mailbox: nothing to hand over */
             }
-            o.step(kCoreSlice);
+            if (g_sliceMatch) {
+                stepIns(o, cdone);
+            } else {
+                sliceStep(o);
+            }
         }
     }
     ht::site = prev;
