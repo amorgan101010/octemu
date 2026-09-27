@@ -70,6 +70,12 @@ uint32_t panel_fb_gen(void);
 bool panel_peer_gone(void);
 int panel_button_id(const char *name);
 
+/* ---- keys.c: the computer keyboard as the panel --------------------------- */
+bool keys_bind(int key, int id);             /* --keymap: SDL keycode -> key id */
+/* One SDL key event (keycode, SDL modifier state). -> the panel used it. */
+bool keys_key(int key, bool down, bool repeat, int mod);
+void keys_release_all(void);                 /* Delete, and on focus loss */
+void keys_tick(void);                        /* a knob click's release */
 /* ---- ocr.c: reading the screen -------------------------------------------- */
 bool ocr_load_fonts(const char *os_image);
 /* Every text run on the framebuffer, newline-joined, so a needle can be found
@@ -113,7 +119,7 @@ void skin_hints(bool on);
 void skin_window(struct SDL_Window *win, struct SDL_Renderer *ren);
 void skin_render(void);
 void skin_view_update(void);
-void skin_mouse_down(float x, float y, bool ctrl);
+void skin_mouse_down(float x, float y, bool push);
 void skin_mouse_motion(float x, float y);
 void skin_mouse_up(void);
 bool skin_over_control(float x, float y);

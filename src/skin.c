@@ -1024,7 +1024,7 @@ static void fader_to(float x)
     panel_xfader(255 - (int)((x - c0) * 255.0f / g_skin.fader->v[4] + 0.5f));
 }
 
-void skin_mouse_down(float x, float y, bool ctrl)
+void skin_mouse_down(float x, float y, bool push)
 {
     PanelHit *h = skin_hit(x, y);
 
@@ -1037,7 +1037,7 @@ void skin_mouse_down(float x, float y, bool ctrl)
     } else if (h->kind == 1) {
         g_ui.enc = h->action;
         g_ui.turned = false;
-        g_ui.push = ctrl && h->action < 7;
+        g_ui.push = push && h->action < 7;
         g_ui.acc = 0;
         g_ui.last_y = y;
         if (g_ui.push) {

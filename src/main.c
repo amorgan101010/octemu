@@ -156,45 +156,18 @@ static const char *k_usage =
     "filesystem first, so the handoff is clean — and ejects it again on exit.\n"
     "No flag needed; the guest's own menu drives it.\n"
     "\n"
-    "Keys: 1-8/q-i trigs, ctrl+1-8 tracks, ctrl+q/w/e/r/t PROJ/PART/AED/MIX/ARR,\n"
-    "a s d f g SRC AMP LFO FX1 FX2, j k l REC PLAY STOP, , . / REC1-3, p PTN,\n"
-    "c CUE, b BANK, m MIDI, n PAGE, \\ TEMPO, [ ] the A and B scene keys,\n"
-    "arrows, enter YES, esc NO, shift FUNC (a held key, not a layer),\n"
-    "alt+1-7 picks the encoder the wheel turns (ctrl+wheel = push-turn),\n"
-    "F1-F7 hold encoder switches 1-7.\n"
+    "Keys (the Monomachine/Machinedrum layout — see src/keys.c): F1-F8 and 1-8\n"
+    "trigs, q-i tracks 1-8, ctrl FUNC, shift latches keys until let go, delete\n"
+    "lets go of everything. Knobs: hold a s d / z x c (A-F), g LEVEL or h the\n"
+    "crossfader and tap - = to turn, [ ] to push-turn; tap alone = click.\n"
+    "space PLAY, end STOP, home REC, arrows, enter YES, backspace NO,\n"
+    "pgup/pgdn PAGE, 9 PROJ, o PART, 0 AED, b MIX, m ARR, n MIDI, tab CUE,\n"
+    "p PTN, ` BANK, \\ TEMPO, k l ; ' j SRC FX1 AMP LFO FX2, , . / REC1-3,\n"
+    "F9 F10 the A and B scene keys. alt+1-7 picks the encoder the wheel turns\n"
+    "(alt+wheel = push-turn).\n"
     "Mouse: click buttons; drag knobs vertically to turn (click = encoder push,\n"
-    "ctrl+drag = push-turn, the wheel over a knob also turns it); drag the\n"
+    "right-drag = push-turn, the wheel over a knob also turns it); drag the\n"
     "crossfader and the headphones volume.\n";
-
-/* Default bindings. mod: 0 none, 1 ctrl. SHIFT is FUNC itself — a held key on
- * the Octatrack, not a layer. */
-static const struct { SDL_Keycode key; int mod; const char *btn; } g_binds[] = {
-    {SDLK_1,0,"TRIG1"},{SDLK_2,0,"TRIG2"},{SDLK_3,0,"TRIG3"},{SDLK_4,0,"TRIG4"},
-    {SDLK_5,0,"TRIG5"},{SDLK_6,0,"TRIG6"},{SDLK_7,0,"TRIG7"},{SDLK_8,0,"TRIG8"},
-    {SDLK_q,0,"TRIG9"},{SDLK_w,0,"TRIG10"},{SDLK_e,0,"TRIG11"},
-    {SDLK_r,0,"TRIG12"},{SDLK_t,0,"TRIG13"},{SDLK_y,0,"TRIG14"},
-    {SDLK_u,0,"TRIG15"},{SDLK_i,0,"TRIG16"},
-    {SDLK_1,1,"TRACK1"},{SDLK_2,1,"TRACK2"},{SDLK_3,1,"TRACK3"},
-    {SDLK_4,1,"TRACK4"},{SDLK_5,1,"TRACK5"},{SDLK_6,1,"TRACK6"},
-    {SDLK_7,1,"TRACK7"},{SDLK_8,1,"TRACK8"},
-    {SDLK_q,1,"PROJ"},{SDLK_w,1,"PART"},{SDLK_e,1,"AED"},{SDLK_r,1,"MIX"},
-    {SDLK_t,1,"ARR"},
-    {SDLK_a,0,"SRC"},{SDLK_s,0,"AMP"},{SDLK_d,0,"LFO"},{SDLK_f,0,"FX1"},
-    {SDLK_g,0,"FX2"},
-    {SDLK_j,0,"REC"},{SDLK_k,0,"PLAY"},{SDLK_l,0,"STOP"},
-    {SDLK_COMMA,0,"REC1"},{SDLK_PERIOD,0,"REC2"},{SDLK_SLASH,0,"REC3"},
-    {SDLK_p,0,"PTN"},{SDLK_c,0,"CUE"},{SDLK_b,0,"BANK"},{SDLK_m,0,"MIDI"},
-    {SDLK_n,0,"PAGE"},{SDLK_BACKSLASH,0,"TEMPO"},
-    {SDLK_LEFTBRACKET,0,"A"},{SDLK_RIGHTBRACKET,0,"B"},
-    {SDLK_UP,0,"UP"},{SDLK_DOWN,0,"DOWN"},{SDLK_LEFT,0,"LEFT"},
-    {SDLK_RIGHT,0,"RIGHT"},{SDLK_RETURN,0,"YES"},{SDLK_ESCAPE,0,"NO"},
-    {SDLK_F1,0,"ENC1"},{SDLK_F2,0,"ENC2"},{SDLK_F3,0,"ENC3"},
-    {SDLK_F4,0,"ENC4"},{SDLK_F5,0,"ENC5"},{SDLK_F6,0,"ENC6"},
-    {SDLK_F7,0,"ENC7"},
-};
-
-static struct { SDL_Keycode key; int id; } g_userbinds[128];
-static int g_nuserbinds;
 
 static InGen parse_spec(const char *s)
 {
@@ -521,16 +494,15 @@ int main(int argc, char **argv)
         if (!f) {
             emu_die("cannot read keymap");
         }
-        while (g_nuserbinds < 128 && fscanf(f, "%63s %63s", kn, bn) == 2) {
+        while (fscanf(f, "%63s %63s", kn, bn) == 2) {
             const SDL_Keycode k = SDL_GetKeyFromName(kn);
             const int id = panel_button_id(bn);
 
             if (k == SDLK_UNKNOWN || id < 0) {
                 fprintf(stderr, "octemu: keymap: bad line %s %s\n",
                         kn, bn);
-            } else {
-                g_userbinds[g_nuserbinds].key = k;
-                g_userbinds[g_nuserbinds++].id = id;
+            } else if (!keys_bind(k, id)) {
+                break;
             }
         }
         fclose(f);
@@ -637,46 +609,31 @@ int main(int argc, char **argv)
 
         skin_view_update();
         while (SDL_PollEvent(&ev)) {
-            const bool ctrl = (SDL_GetModState() & KMOD_CTRL) != 0;
+            /* Alt, not Ctrl, is the mouse's push-turn: Ctrl is FUNC now. */
             const bool alt = (SDL_GetModState() & KMOD_ALT) != 0;
 
             switch (ev.type) {
             case SDL_QUIT:
                 g_quit = true;
                 break;
+            case SDL_WINDOWEVENT:
+                /* The key-ups of whatever is held will go to another window. */
+                if (ev.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
+                    keys_release_all();
+                }
+                break;
             case SDL_KEYDOWN:
             case SDL_KEYUP: {
                 const bool down = ev.type == SDL_KEYDOWN;
                 const SDL_Keycode k = ev.key.keysym.sym;
-                bool sent = false;
 
-                if (ev.key.repeat) {
-                    break;
-                }
-                if (k == SDLK_LSHIFT || k == SDLK_RSHIFT) {
-                    panel_key(45, down);       /* SHIFT is FUNC, a held key */
-                    break;
-                }
                 if (alt && k >= SDLK_1 && k <= SDLK_7) {
                     if (down) {
                         active_enc = k - SDLK_1;
                     }
                     break;
                 }
-                for (int i = 0; i < g_nuserbinds && !sent; i++) {
-                    if (g_userbinds[i].key == k && !ctrl) {
-                        panel_key(g_userbinds[i].id, down);
-                        sent = true;
-                    }
-                }
-                for (size_t i = 0;
-                     !sent && i < sizeof g_binds / sizeof *g_binds; i++) {
-                    if (g_binds[i].key == k &&
-                        g_binds[i].mod == (ctrl ? 1 : 0)) {
-                        panel_key(panel_button_id(g_binds[i].btn), down);
-                        sent = true;
-                    }
-                }
+                keys_key(k, down, ev.key.repeat != 0, ev.key.keysym.mod);
                 break;
             }
             case SDL_MOUSEWHEEL: {
@@ -697,7 +654,7 @@ int main(int argc, char **argv)
                     audio_set_phones(audio_phones() + d * 0.05f);
                     break;
                 }
-                if (ctrl) {                        /* push-turn */
+                if (alt) {                         /* push-turn */
                     panel_key(56 + enc, true);
                     panel_encoder(enc, d);
                     panel_key(56 + enc, false);
@@ -710,12 +667,16 @@ int main(int argc, char **argv)
             case SDL_MOUSEBUTTONUP: {
                 float lx, ly;
 
-                if (ev.button.button != SDL_BUTTON_LEFT) {
+                if (ev.button.button != SDL_BUTTON_LEFT &&
+                    ev.button.button != SDL_BUTTON_RIGHT) {
                     break;
                 }
                 skin_view_mouse(ev.button.x, ev.button.y, &lx, &ly);
                 if (ev.type == SDL_MOUSEBUTTONDOWN) {
-                    skin_mouse_down(lx, ly, ctrl);
+                    /* Right-drag is push-turn: Ctrl is FUNC, and Alt-drag
+                     * belongs to the window manager on most Linux desktops. */
+                    skin_mouse_down(lx, ly,
+                                    ev.button.button == SDL_BUTTON_RIGHT);
                 } else {
                     skin_mouse_up();
                 }
@@ -737,6 +698,7 @@ int main(int argc, char **argv)
             }
         }
         skin_tick();
+        keys_tick();
         SDL_RenderClear(ren);
         skin_render();
         /* ☠ The grab goes BEFORE the present, not after. SDL_RenderReadPixels

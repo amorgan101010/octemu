@@ -65,7 +65,7 @@ SDL_LIBS   = $(shell pkg-config --libs sdl2)
 
 # One platform file, named after `uname`: an unported host then fails by naming
 # the file somebody has to write, not with a pile of undefined symbols.
-EMUSRC := src/main.c src/panel.c src/ocr.c src/audio.c src/skin.c src/script.c \
+EMUSRC := src/main.c src/panel.c src/ocr.c src/audio.c src/skin.c src/script.c src/keys.c \
           src/platform/$(shell echo $(UNAME) | tr A-Z a-z).c
 
 # The default build is what `./octemu` with no flags needs: both
