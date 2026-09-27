@@ -32,6 +32,17 @@ ends up around 1.2 GB.
 `octemu` boots from the CF card image `make` leaves in `out/state/`, and writes
 its battery file alongside on the first run.
 
+**Remote panel.** A windowed `octemu` also serves the front panel to browsers
+on the local network, and prints the address at start (`octemu: remote panel
+at http://…:8798/`). Open it on a tablet to play the panel with your fingers:
+keys stay held while touched, so chords and parameter locks work (hold a trig,
+turn a knob). Drag a knob to turn it, tap it to click, or hold it still and
+then drag to push-turn. The screen, lamps and crossfader follow the emulator
+live. There is no password, so use it on a network you trust. `--no-remote`
+turns it off, `--remote-port N` moves it, and `--remote` turns it on for
+`--headless` and `--script` runs, which leave it off by default.
+`python3 tests/remote-panel.py` tests it end to end.
+
 **Known issues**
 
 The playback warbles. I think this can be fixed by buffering.

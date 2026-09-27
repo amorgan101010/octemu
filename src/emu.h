@@ -69,6 +69,21 @@ bool panel_lamp_lit(int bit_id);
 uint32_t panel_fb_gen(void);
 bool panel_peer_gone(void);
 int panel_button_id(const char *name);
+/* The face plate's elements, named by their ids in assets/panel/octatrack.svg:
+ * shared by the window and the browser panel. */
+#define PANEL_NLAMPS 53
+typedef struct { const char *svg; int lamp, chan; } PanelLamp;
+extern const PanelLamp panel_lamps[PANEL_NLAMPS];
+void panel_lamp_rgb(const PanelState *p, int k, uint8_t out[3]);
+int panel_svg_key(const char *svg);          /* key id 0-63, or -1 */
+int panel_svg_knob(const char *svg);         /* 0-6 encoder, 7 phones, or -1 */
+const char *panel_key_svg(int id, char *buf, size_t cap);   /* or NULL */
+
+/* ---- remote.c: the panel in a browser on the local network ---------------- */
+#define REMOTE_PORT 8798                     /* after gearmulator/digiemu's */
+bool remote_start(int first_port);
+void remote_stop(void);
+const char *remote_url(void);                /* NULL when not serving */
 
 /* ---- keys.c: the computer keyboard as the panel --------------------------- */
 bool keys_bind(int key, int id);             /* --keymap: SDL keycode -> key id */

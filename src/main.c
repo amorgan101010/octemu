@@ -45,6 +45,8 @@ static struct {
     InGen in[INS];
     bool midi;                      /* --midi: host MIDI bridge on UART0 */
     bool no_hints;                  /* --no-hints: no press/turn chrome */
+    int remote;                     /* -1 --no-remote, 1 --remote, 0 auto */
+    int remote_port;
     pid_t qemu;
     char dir[64];
 } g;
@@ -69,7 +71,7 @@ static const char *k_usage =
     "                          [--script F.jsonl] [--timeout SECS]\n"
     "                          [--recording X.wav|X.mov|X.gif]\n"
     "                          [--video MODE] [--video-width N] [--no-hints]\n"
-    "                          [--midi]\n"
+    "                          [--midi] [--remote|--no-remote] [--remote-port N]\n"
     "                          [--in-a SPEC]..[--in-d SPEC]\n"
     "\n"
     "Boots the Octatrack on the patched QEMU with the real DSP cores, at real\n"
@@ -118,6 +120,15 @@ static const char *k_usage =
     "                ports, so other apps can play it and be played by it:\n"
     "                'Octatrack Emulator' is the Octatrack's MIDI OUT,\n"
     "                'Octatrack Emulator In' its MIDI IN\n"
+    "  --remote      serve the panel to a browser on the local network (an\n"
+    "                iPad, say): the real face plate with the live screen and\n"
+    "                lamps, played with multitouch. On by default with a window;\n"
+    "                --headless and --script runs need --remote for it. The\n"
+    "                address is printed at start. No password: anyone on the\n"
+    "                network can play it\n"
+    "  --no-remote   do not serve it\n"
+    "  --remote-port N  the first port tried (default 8798; the next nine\n"
+    "                are tried if it is taken)\n"
     "  --in-a..d S   what is plugged into inputs IN A-D: sin:HZ, cos:HZ,\n"
     "                loop:F.wav, one:F.wav, silence\n"
     "  --mk1         present the panel as a MKI (57 keys) instead of a MKII\n"
@@ -347,6 +358,7 @@ static void remove_rundir(void)
 static void cleanup(void)
 {
     g_quit = true;
+    remote_stop();                      /* its pages let go of their keys */
     if (g.qemu > 0) {
         kill(g.qemu, SIGTERM);
         waitpid(g.qemu, NULL, 0);
@@ -428,6 +440,9 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--unthrottled"))  { g.throttle = 0; }
         else if (!strcmp(a, "--midi"))        g.midi = true;
         else if (!strcmp(a, "--no-hints"))   { g.no_hints = true; }
+        else if (!strcmp(a, "--remote"))      { g.remote = 1; }
+        else if (!strcmp(a, "--no-remote"))   { g.remote = -1; }
+        else if (!strcmp(a, "--remote-port")) { ARG(); g.remote_port = atoi(val); }
         else if (!strcmp(a, "--interleave"))  { ARG(); g.interleave = atoi(val); }
         else if (!strcmp(a, "--audio-buffer")) { ARG(); audio_set_buffers((unsigned)atoi(val), 0); }
         else if (!strcmp(a, "--audio-cushion")) { ARG(); audio_set_buffers(0, (unsigned)atoi(val)); }
@@ -544,6 +559,11 @@ int main(int argc, char **argv)
         emu_die("panel socket");
     }
     spawn_qemu(panel_sock, audio_sock);
+    /* Off by default for headless and scripted runs: the harnesses run those
+     * by the batch, in parallel, and none of them should open a port. */
+    if (g.remote > 0 || (!g.remote && !g.headless && !g.script)) {
+        remote_start(g.remote_port > 0 ? g.remote_port : REMOTE_PORT);
+    }
     if (g.midi) {
         char sock[128];
 
@@ -563,6 +583,13 @@ int main(int argc, char **argv)
         win = SDL_CreateWindow("octemu", SDL_WINDOWPOS_CENTERED,
                                SDL_WINDOWPOS_CENTERED, 1250, 682,
                                SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_RESIZABLE);
+        if (remote_url()) {             /* where a tablet finds the panel */
+            char title[160];
+
+            snprintf(title, sizeof title, "octemu - remote panel at %s",
+                     remote_url());
+            SDL_SetWindowTitle(win, title);
+        }
         ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_PRESENTVSYNC);
         skin_window(win, ren);
         /* Raising and activating is right when a PERSON launched the

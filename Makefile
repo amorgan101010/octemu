@@ -65,7 +65,7 @@ SDL_LIBS   = $(shell pkg-config --libs sdl2)
 
 # One platform file, named after `uname`: an unported host then fails by naming
 # the file somebody has to write, not with a pile of undefined symbols.
-EMUSRC := src/main.c src/panel.c src/ocr.c src/audio.c src/skin.c src/script.c src/keys.c \
+EMUSRC := src/main.c src/panel.c src/ocr.c src/audio.c src/skin.c src/script.c src/keys.c src/remote.c \
           src/platform/$(shell echo $(UNAME) | tr A-Z a-z).c
 
 # The default build is what `./octemu` with no flags needs: both
@@ -76,6 +76,7 @@ all: octdsp octemu panel card
         receive-gif \
         test test-audio \
         test-dsp test-dsp-metro test-emac test-emu test-emu-audio \
+        test-remote-panel \
         test-emu-usb test-usb-midi test-usb-audio \
         test-emu-usb-midi test-emu-usb-midi-conform test-emu-usb-midi-enum \
         test-emu-usb-midi-stress test-emu-usb-midi-coexist \
@@ -205,6 +206,13 @@ test-emu: octemu $(QEMU) $(IMG)
 	@echo "== test-emu: expect ~4 s =="
 	./octemu --headless --cf-card none --nvram none \
 	    --script tests/walks/boot-nocard.jsonl --timeout 90
+
+# The remote panel (src/remote.c) from a stand-in browser: page and assets
+# served, handshake, layout, state, and that a page which leaves or goes
+# silent lets go of the keys it held.
+test-remote-panel: octemu $(QEMU) $(IMG)
+	@echo "== test-remote-panel: expect ~25 s =="
+	python3 tests/remote-panel.py
 
 # The metronome is core 1's, and it is the only test that exercises the
 # inter-core handoff through the shared window, core 1's render path and the

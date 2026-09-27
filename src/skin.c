@@ -64,84 +64,25 @@ static struct { float scale, offx, offy, dpr; } g_view;
 static uint32_t g_screen_gen;
 static bool g_screen_valid;
 
-/* Lamp map, measured. L<n> = bit ids 2n/2n+1; chan is which channels this
- * element shows (3 = both, additive — the meter lamps split their two channels
- * across two physical LEDs). */
-static const struct {
-    const char *svg;
-    int lamp, chan;
-} g_lampmap[] = {
-    {"trig-1",0,3},{"trig-2",1,3},{"trig-3",2,3},{"trig-4",3,3},
-    {"trig-5",4,3},{"trig-6",5,3},{"trig-7",6,3},{"trig-8",7,3},
-    {"trig-9",8,3},{"trig-10",9,3},{"trig-11",10,3},{"trig-12",11,3},
-    {"trig-13",12,3},{"trig-14",13,3},{"trig-15",14,3},{"trig-16",15,3},
-    {"btn-a",16,3},{"btn-b",17,3},
-    {"led-card-status",18,3},          /* green, flickers with CF activity */
-    {"btn-tempo",19,3},                /* pulses with the tempo */
-    {"btn-t1",20,3},{"btn-t2",21,3},{"btn-t3",22,3},{"btn-t4",23,3},
-    {"btn-t5",24,3},{"btn-t6",25,3},{"btn-t7",26,3},{"btn-t8",27,3},
-    {"led-rec-status",32,3},           /* FUNC+ARR lights it red */
-    {"btn-src",33,3},{"btn-amp",34,3},{"btn-midi",35,3},
-    /* page LEDs: dim red = the page exists, bright = the active edit page in
-     * grid rec, amber beat-flash = the page the sequencer is playing */
-    {"led-page-1",36,3},{"led-page-2",37,3},{"led-page-3",38,3},
-    {"led-page-4",39,3},
-    {"btn-fx1",40,3},{"btn-fx2",41,3},{"btn-rec",42,3},{"btn-lfo",43,3},
-    {"btn-stop",44,3},{"btn-play",45,3},
-    {"btn-mix",51,3},
-    {"btn-proj",60,3},{"btn-part",61,3},{"btn-aed",62,3},{"btn-arr",63,3},
-    {"led-in-a",64,1},{"led-in-b",64,2},
-    {"led-in-c",65,1},{"led-in-d",65,2},
-    {"led-int-l",66,1},{"led-int-r",66,2},
-};
-
-/* The runtime half of the map above, filled by skin_load: the two sprites
- * each element draws with, and its key id (-1 when the element is not a
- * key). Parallel rather than three more members of g_lampmap, because that
+/* The runtime half of panel_lamps (panel.c), filled by skin_load: the two
+ * sprites each element draws with, and its key id (-1 when the element is not
+ * a key). Parallel rather than three more members of panel_lamps, because that
  * table is measured data written three entries to a line — carrying fields
  * it does not initialise would mean spelling out all six on every row. */
 static struct { Sprite *u, *i; int key; }
-    g_lampst[sizeof g_lampmap / sizeof *g_lampmap];
+    g_lampst[PANEL_NLAMPS];
 
 static Sprite *g_pressed[64];          /* key id -> pressed sprite */
-
-static const struct { const char *svg; const char *btn; } g_hitbtn[] = {
-    {"btn-midi","MIDI"},{"btn-rec1","REC1"},{"btn-rec2","REC2"},
-    {"btn-rec3","REC3"},{"btn-proj","PROJ"},{"btn-part","PART"},
-    {"btn-aed","AED"},{"btn-mix","MIX"},{"btn-arr","ARR"},{"btn-func","FUNC"},
-    {"btn-cue","CUE"},{"btn-ptn","PTN"},{"btn-bank","BANK"},{"btn-yes","YES"},
-    {"btn-no","NO"},{"btn-up","UP"},{"btn-down","DOWN"},{"btn-left","LEFT"},
-    {"btn-right","RIGHT"},{"btn-rec","REC"},{"btn-play","PLAY"},
-    {"btn-stop","STOP"},{"btn-src","SRC"},{"btn-amp","AMP"},{"btn-lfo","LFO"},
-    {"btn-fx1","FX1"},{"btn-fx2","FX2"},{"btn-tempo","TEMPO"},{"btn-a","A"},
-    {"btn-b","B"},{"btn-page","PAGE"},
-};
 
 bool skin_ok(void) { return g_skin.ok; }
 
 static int hit_action(const PanelHit *h)
 {
     if (h->kind == 0) {
-        if (!strncmp(h->name, "trig-", 5)) {
-            return atoi(h->name + 5) - 1;
-        }
-        if (h->name[0] == 'b' && h->name[4] == 't' &&
-            isdigit((unsigned char)h->name[5])) {
-            return 16 + h->name[5] - '1';           /* btn-tN -> TRACK N */
-        }
-        for (size_t i = 0; i < sizeof g_hitbtn / sizeof *g_hitbtn; i++) {
-            if (!strcmp(h->name, g_hitbtn[i].svg)) {
-                return panel_button_id(g_hitbtn[i].btn);
-            }
-        }
-        return -1;
+        return panel_svg_key(h->name);
     }
     if (h->kind == 1) {                             /* encoder index */
-        if (!strcmp(h->name, "knob-level")) return 6;
-        if (!strcmp(h->name, "knob-phones")) return 7;   /* analog pot, local */
-        if (h->name[5] >= 'a' && h->name[5] <= 'f' && !h->name[6]) {
-            return h->name[5] - 'a';
-        }
+        return panel_svg_knob(h->name);
     }
     return -1;
 }
@@ -240,16 +181,16 @@ bool skin_load(void)
     if (!g_skin.handle || !g_skin.fader || !g_skin.screen) {
         emu_die("panel.bin lacks fader/screen");
     }
-    for (size_t i = 0; i < sizeof g_lampmap / sizeof *g_lampmap; i++) {
+    for (size_t i = 0; i < PANEL_NLAMPS; i++) {
         char n[36];
         PanelHit *h;
 
-        snprintf(n, sizeof n, "%s|u", g_lampmap[i].svg);
+        snprintf(n, sizeof n, "%s|u", panel_lamps[i].svg);
         g_lampst[i].u = sprite(n);
-        snprintf(n, sizeof n, "%s|i", g_lampmap[i].svg);
+        snprintf(n, sizeof n, "%s|i", panel_lamps[i].svg);
         g_lampst[i].i = sprite(n);
         g_lampst[i].key = -1;
-        h = hit_by_name(g_lampmap[i].svg);
+        h = hit_by_name(panel_lamps[i].svg);
         if (h && h->kind == 0) {
             g_lampst[i].key = h->action;
         }
@@ -694,7 +635,7 @@ static void hints_draw(const PanelState *p)
 
 void skin_render(void)
 {
-    enum { NLAMP = sizeof g_lampmap / sizeof *g_lampmap };
+    enum { NLAMP = PANEL_NLAMPS };
     SDL_FRect full = view_rect(0, 0, g_skin.vbw, g_skin.vbh);
     int tint[NLAMP][3];
     bool pressed[NLAMP];
@@ -708,28 +649,12 @@ void skin_render(void)
     panel_snapshot(&p);
     SDL_RenderCopyF(g_ren, g_skin.base_tex, NULL, &full);
 
-    /* tint = sum over lit channels of palette colour x brightness, with
-     * 0x44 x 15 as full scale (the firmware's maximum) */
     for (size_t k = 0; k < NLAMP; k++) {
-        int acc[3] = {0, 0, 0};
+        uint8_t rgb[3];
 
-        for (int bit = 0; bit < 2; bit++) {
-            const int id = 2 * g_lampmap[k].lamp + bit;
-            const int br = p.bright[id];
-            const uint8_t *c = p.rgb[4 * g_lampmap[k].lamp + 1 + bit];
-
-            if (!(g_lampmap[k].chan >> bit & 1) || !br ||
-                !(p.lit[id >> 3] >> (id & 7) & 1)) {
-                continue;
-            }
-            for (int ch = 0; ch < 3; ch++) {
-                acc[ch] += c[ch] * br;
-            }
-        }
+        panel_lamp_rgb(&p, (int)k, rgb);
         for (int ch = 0; ch < 3; ch++) {
-            const int v = acc[ch] * 255 / (0x44 * 15);
-
-            tint[k][ch] = v > 255 ? 255 : v;
+            tint[k][ch] = rgb[ch];
         }
         pressed[k] = g_lampst[k].key >= 0 &&
                      (p.keys[g_lampst[k].key >> 3] >>

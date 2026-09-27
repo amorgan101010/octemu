@@ -65,6 +65,125 @@ int panel_button_id(const char *name)
     return -1;
 }
 
+/* ---- the face plate's elements, by SVG id ----------------------------------
+ * Shared by the window (skin.c) and the browser panel (remote.c), which both
+ * name controls by their ids in assets/panel/octatrack.svg. */
+
+/* Lamp map, measured. L<n> = bit ids 2n/2n+1; chan is which channels this
+ * element shows (3 = both, additive — the meter lamps split their two channels
+ * across two physical LEDs). */
+const PanelLamp panel_lamps[PANEL_NLAMPS] = {
+    {"trig-1",0,3},{"trig-2",1,3},{"trig-3",2,3},{"trig-4",3,3},
+    {"trig-5",4,3},{"trig-6",5,3},{"trig-7",6,3},{"trig-8",7,3},
+    {"trig-9",8,3},{"trig-10",9,3},{"trig-11",10,3},{"trig-12",11,3},
+    {"trig-13",12,3},{"trig-14",13,3},{"trig-15",14,3},{"trig-16",15,3},
+    {"btn-a",16,3},{"btn-b",17,3},
+    {"led-card-status",18,3},          /* green, flickers with CF activity */
+    {"btn-tempo",19,3},                /* pulses with the tempo */
+    {"btn-t1",20,3},{"btn-t2",21,3},{"btn-t3",22,3},{"btn-t4",23,3},
+    {"btn-t5",24,3},{"btn-t6",25,3},{"btn-t7",26,3},{"btn-t8",27,3},
+    {"led-rec-status",32,3},           /* FUNC+ARR lights it red */
+    {"btn-src",33,3},{"btn-amp",34,3},{"btn-midi",35,3},
+    /* page LEDs: dim red = the page exists, bright = the active edit page in
+     * grid rec, amber beat-flash = the page the sequencer is playing */
+    {"led-page-1",36,3},{"led-page-2",37,3},{"led-page-3",38,3},
+    {"led-page-4",39,3},
+    {"btn-fx1",40,3},{"btn-fx2",41,3},{"btn-rec",42,3},{"btn-lfo",43,3},
+    {"btn-stop",44,3},{"btn-play",45,3},
+    {"btn-mix",51,3},
+    {"btn-proj",60,3},{"btn-part",61,3},{"btn-aed",62,3},{"btn-arr",63,3},
+    {"led-in-a",64,1},{"led-in-b",64,2},
+    {"led-in-c",65,1},{"led-in-d",65,2},
+    {"led-int-l",66,1},{"led-int-r",66,2},
+};
+
+/* tint = sum over lit channels of palette colour x brightness, with 0x44 x 15
+ * as full scale (the firmware's maximum) */
+void panel_lamp_rgb(const PanelState *p, int k, uint8_t out[3])
+{
+    int acc[3] = {0, 0, 0};
+
+    for (int bit = 0; bit < 2; bit++) {
+        const int id = 2 * panel_lamps[k].lamp + bit;
+        const int br = p->bright[id];
+        const uint8_t *c = p->rgb[4 * panel_lamps[k].lamp + 1 + bit];
+
+        if (!(panel_lamps[k].chan >> bit & 1) || !br ||
+            !(p->lit[id >> 3] >> (id & 7) & 1)) {
+            continue;
+        }
+        for (int ch = 0; ch < 3; ch++) {
+            acc[ch] += c[ch] * br;
+        }
+    }
+    for (int ch = 0; ch < 3; ch++) {
+        const int v = acc[ch] * 255 / (0x44 * 15);
+
+        out[ch] = (uint8_t)(v > 255 ? 255 : v);
+    }
+}
+
+static const struct { const char *svg; const char *btn; } g_svgbtn[] = {
+    {"btn-midi","MIDI"},{"btn-rec1","REC1"},{"btn-rec2","REC2"},
+    {"btn-rec3","REC3"},{"btn-proj","PROJ"},{"btn-part","PART"},
+    {"btn-aed","AED"},{"btn-mix","MIX"},{"btn-arr","ARR"},{"btn-func","FUNC"},
+    {"btn-cue","CUE"},{"btn-ptn","PTN"},{"btn-bank","BANK"},{"btn-yes","YES"},
+    {"btn-no","NO"},{"btn-up","UP"},{"btn-down","DOWN"},{"btn-left","LEFT"},
+    {"btn-right","RIGHT"},{"btn-rec","REC"},{"btn-play","PLAY"},
+    {"btn-stop","STOP"},{"btn-src","SRC"},{"btn-amp","AMP"},{"btn-lfo","LFO"},
+    {"btn-fx1","FX1"},{"btn-fx2","FX2"},{"btn-tempo","TEMPO"},{"btn-a","A"},
+    {"btn-b","B"},{"btn-page","PAGE"},
+};
+
+int panel_svg_key(const char *svg)
+{
+    if (!strncmp(svg, "trig-", 5) && isdigit((unsigned char)svg[5])) {
+        const int n = atoi(svg + 5);
+
+        return n >= 1 && n <= 16 ? n - 1 : -1;
+    }
+    if (!strncmp(svg, "btn-t", 5) && svg[5] >= '1' && svg[5] <= '8' &&
+        !svg[6]) {
+        return 16 + svg[5] - '1';                  /* btn-tN -> TRACK N */
+    }
+    for (size_t i = 0; i < sizeof g_svgbtn / sizeof *g_svgbtn; i++) {
+        if (!strcmp(svg, g_svgbtn[i].svg)) {
+            return panel_button_id(g_svgbtn[i].btn);
+        }
+    }
+    return -1;
+}
+
+/* -> the SVG id of key `id`, or NULL; `buf` holds the ids that are built. */
+const char *panel_key_svg(int id, char *buf, size_t cap)
+{
+    if (id >= 0 && id < 16) {
+        snprintf(buf, cap, "trig-%d", id + 1);
+        return buf;
+    }
+    if (id >= 16 && id < 24) {
+        snprintf(buf, cap, "btn-t%d", id - 15);
+        return buf;
+    }
+    for (size_t i = 0; i < sizeof g_svgbtn / sizeof *g_svgbtn; i++) {
+        if (panel_button_id(g_svgbtn[i].btn) == id) {
+            return g_svgbtn[i].svg;
+        }
+    }
+    return NULL;
+}
+
+int panel_svg_knob(const char *svg)
+{
+    if (!strcmp(svg, "knob-level")) return 6;
+    if (!strcmp(svg, "knob-phones")) return 7;     /* analog pot, local */
+    if (!strncmp(svg, "knob-", 5) && svg[5] >= 'a' && svg[5] <= 'f' &&
+        !svg[6]) {
+        return svg[5] - 'a';
+    }
+    return -1;
+}
+
 /* ---- state ---------------------------------------------------------------- */
 static struct {
     PanelState st;
@@ -138,11 +257,14 @@ void panel_key(int id, bool down)
         g.st.keys[grp] &= ~(1u << bit);
     }
     /* A key frame is a SNAPSHOT of the whole group; a bare key would release
-     * its neighbours. */
+     * its neighbours. It is sent under the lock: the window and the remote
+     * panel's threads both press keys, and a snapshot overtaken by a newer
+     * one would land last and release what the newer one holds. The fd is
+     * nonblocking, so the write does not wait. */
     f[0] = (uint8_t)(0x20 | grp);
     f[1] = g.st.keys[grp];
-    pthread_mutex_unlock(&g.lock);
     panel_send(f, 2);
+    pthread_mutex_unlock(&g.lock);
 }
 
 void panel_encoder(int enc, int delta)
@@ -170,10 +292,10 @@ void panel_xfader(int pos)
     if (pos > 255) pos = 255;
     pthread_mutex_lock(&g.lock);
     g.st.xfader = pos;                 /* the skin draws the handle here */
-    pthread_mutex_unlock(&g.lock);
     f[0] = 0x40;
     f[1] = (uint8_t)pos;
-    panel_send(f, 2);
+    panel_send(f, 2);                  /* under the lock, as panel_key */
+    pthread_mutex_unlock(&g.lock);
 }
 
 /* ---- inbound -------------------------------------------------------------- */
@@ -264,8 +386,8 @@ static void *panel_thread(void *arg)
             pthread_mutex_lock(&g.lock);
             f[0] = 0x40;
             f[1] = (uint8_t)g.st.xfader;
+            panel_send(f, 2);          /* under the lock, as panel_key */
             pthread_mutex_unlock(&g.lock);
-            panel_send(f, 2);
         }
         struct pollfd p = { g.fd, POLLIN, 0 };
 
