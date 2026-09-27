@@ -1,6 +1,7 @@
 # Plan: validate instruction-matched DSP stepping (bug-031) on macOS
 
-Status: handed over from the Linux agent 2026-09-26; not started on macOS.
+Status: handed over from the Linux agent 2026-09-26. macOS ran steps 0, 1, 3 and
+part of 4 the same day; results and verdict in PERF-NOTES under bug-031.
 Branch: `diag/handoff-trace` (on `linux` + the handoff diagnostics).
 Background: `docs/PERF-NOTES.md`, the "Traced (2026-09-25)" and "bug-031"
 sections. Read both first.

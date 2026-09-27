@@ -261,12 +261,99 @@ overrides it, and trigsweep keeps each run's output in `out/trig8-LABEL.out`.
 A matched run under that load was late for 98% of its blocks (shipped: 8%):
 see the cost step.
 
-**Still to do before it can ship** (plan: `docs/plan-validate-slice-match.md`):
-project-load time, a `bench.sh` A/B, the margin on the guest-instruction clock
-(`scripts/diag/handoff-margin.py`), and a machine/FX combo sweep, especially
-Neighbors and FX on T5-T8. The codec's clock is the wrong ruler for the
-margin: the race is decided while the codec is frozen holding its bank-index
-word.
+**⚠ Verdict from macOS (2026-09-26): do NOT make OCTA_SLICE_MATCH the
+default. It fails reproducibly on a nearby configuration (V1 below), at a
+new phase, where the shipped stepping drops less.** Steps 1, 3 and 4 were
+run. Step 2 (bench A/B, load time) was not: the Mac is too slow and too
+noisy a host for it (see "macOS as a test host" at the end of this section).
+
+**Step 1, regression gates with OCTA_SLICE_MATCH=1:** `scripts/gates.sh`
+(from `macos-perf`) 13/13: test-dsp, -metro, test-emu, EMAC + bit-exact
+emac-diff, test-emu-audio x3, trig8 x3, keys-72, save-reload. trig8 8/8
+clean, median body 2233. USB: `test-emu-usb` and `test-usb-audio` pass with
+and without the switch. `test-usb-midi` fails with AND without it, at the
+same check ("no USB-MIDI Start (0xFA) on EP2 IN"), so not the switch; not
+chased. The USB scripts need GNU `timeout`, which macOS lacks (a perl
+`alarm` stand-in on PATH works), and a dirty tree makes the Makefile look
+for `_SNAPSHOT.os` firmware that nothing builds.
+
+**Step 3, the margin.** Traces of q12 and trig8, shipped and matched,
+`scripts/diag/handoff-margin.py` (T1-T4 only: the watch covers core 1's banks,
+so there is no margin measurement for T5-T8):
+
+| | T1 regime | min `to next` (guest insns) | `since take` (in-render) |
+|---|---|---|---|
+| q12 shipped (drops) | 199 in / 305 ahead | 41,729 | 0-18 |
+| q12 matched | 504 in | 41,966 | 0-18 |
+| trig8 shipped | 79 in / 403 ahead | 42,753 | 18 |
+| trig8 matched | 482 in | 43,520 | 0-78 |
+
+Matched runs hold one regime, but **`to next` is not the margin**: the
+shipped run that drops has the same ~82 quanta. What differs is `since take`,
+and it is 0-18 guest instructions in every in-render landing, both modes:
+the landing and core 1's take fall in the same 512-instruction quantum, so
+their order is set by the shim's stepping, below this ruler's resolution.
+The other available clock, `e1` (core-1 execs), changes unit when the
+switch is on (core 1 runs more execs per codec slice), so it cannot compare
+the modes either. On the shipped build `e1` does show the edge: T1's
+landings at e1 1200-1205 fall on both sides. **No existing ruler measures
+the matched margin.** V1 below says it is small.
+
+**Step 4, combos. First: the NVRAM, not the card, holds the open bank.**
+The firmware boots bank 1 from the NVRAM's working copy (part p at 0xa4ece
++ p * 0x18b2, pattern A01 track t at 0x1614e + t * 0x91a, both byte-for-byte
+the bank file minus chunk headers). Editing only `bank01.work/.strd`
+changes nothing: a first sweep of variants was the unmodified project
+three times over and is discarded. `tests/trigsweep-variant.py` now writes
+both. Controls: T2 -> Flex makes T1 audible (q1 2212) and T2 silent; comb on
+T5 moves q5 2229 -> 2265; stress on T3 scrambles q3; mirroring parts 1-4
+over 5-8 alone changes nothing.
+
+**New: with T2 not a Neighbor, T1 drops on its own** on the shipped build
+(q1 [9, 17, ... 81]). The exposed record is T1's, whether heard directly or
+through the Neighbor.
+
+**V1 = the fixture + comb on T5 FX2, Neighbor on T6, spring on T7 FX2**
+(all on the codec side; q5 silent and q7 2229 -> 2265 prove it loaded):
+
+| V1 | shipped | OCTA_SLICE_MATCH=1 (two runs) |
+|---|---|---|
+| q12 | [9, 17, ... 81] | [3, 4, 11, 12, 19, 20, ... 83, 84], identical both runs |
+| q3 | clean | [4, 12, 19, 20, 28, ... 84] / [11, 12, 27, 28, ... 84] |
+| q4, q7, q8 | clean | clean |
+| q56 (T5 via Neighbor on T6, codec) | clean | clean |
+| q5 | silent (T6 is its Neighbor) | silent |
+
+All hatch=0. **Matching is worse than shipped here**: two tracks instead of
+one, at phases 3-4 of the 8-beat cycle instead of 1. Codec-side FX alone
+moved core 1's exposure, so matching instructions moved the window rather
+than closing it. T5-T8 themselves (q56, q7, q8) never dropped in any mode
+tested. Reproduce:
+
+```sh
+python3 tests/trigsweep-variant.py out/tsv/v1 T5:fx2=comb T6:type=neighbor T7:fx2=spring
+FX=out/tsv/v1 OCTA_SLICE_MATCH=1 TIMEOUT=1500 tests/trigsweep.sh v1 q3 q12
+```
+
+**`OCTA_LONE_CORE=1` hangs on V1**: q12 and q56 both froze ~0.13 s after
+PLAY, 100% CPU, deaf to quit (the TCG thread holds the BQL). Stack: a
+ColdFire write -> `ot_dsp_write` -> `drainStep` -> `Core::step` ->
+`JitBlockChain::create` on every step, i.e. core 1's PC in something that
+is never cached as code, while the drain waits for it. The lone stepping can
+wedge the DSP, not only drop notes. Only a control mode; no fix attempted.
+
+Not run: V1 with lone stepping beyond q12/q56, V2 (the V1 codec-side setup
+with T1-T3 made plain), V3 (Thru T4 / Static T7 / Pickup T8) and the stress
+variants S1-S3 (`stress=1`: every step trigged, 15 locks per step, three
+LFOs, on the muted tracks; the recipe is OctaBam's `stress_project.py`). The
+generator supports all of them (`tests/trigsweep-variant.py --help`).
+
+**macOS as a test host.** A trigsweep run is ~357 guest seconds. On the 8 GB
+M1 Air, runs took 2.5-10 min each and depended on everything else on the
+machine: orphaned emulators and swap turned runs into timeouts (fixed
+`--timeout 580` -> `TIMEOUT`), sleeping on low battery tripped the
+delivery hatch, and after the wake coreaudiod held a full core for hours.
+Every accepted result above has hatch=0; runs that did not were rerun.
 
 ~~**0017 still stays out**~~ **RESOLVED, 0017 is back**: see "0017 is back:
 its load penalty was LOST INTERRUPTS" above. History: it made project

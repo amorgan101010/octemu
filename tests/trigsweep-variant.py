@@ -168,7 +168,7 @@ def main():
     fixture = 'trigsweep'
     if args[:1] == ['--from']:
         fixture, args = args[1], args[2:]
-    if not args or fixture not in FIXTURES:
+    if not args or fixture not in FIXTURES or args[0].startswith('-'):
         sys.exit(__doc__)
     src, out = HERE / fixture, pathlib.Path(args[0])
     edits = [parse(a) for a in args[1:]]
