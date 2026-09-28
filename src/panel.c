@@ -193,6 +193,10 @@ static struct {
     bool running, peer_gone;
     uint8_t pkt[10];
     int have, want;
+    /* Outbound bytes the socket would not take yet (under lock). */
+    uint8_t out[4096];
+    size_t out_len;
+    unsigned long out_lost;            /* whole frames with no room at all */
 } g;
 
 void panel_snapshot(PanelState *out)
@@ -232,12 +236,55 @@ uint32_t panel_fb_gen(void)
 bool panel_peer_gone(void) { return g.peer_gone; }
 
 /* ---- outbound ------------------------------------------------------------- */
-/* One write() per frame, so frames from different threads cannot interleave. */
+/* Write what is waiting in g.out. Call with g.lock held. */
+static void panel_flush(void)
+{
+    while (g.fd >= 0 && g.out_len) {
+        const ssize_t w = write(g.fd, g.out, g.out_len);
+
+        if (w <= 0) {
+            if (w < 0 && errno != EAGAIN && errno != EINTR) {
+                g.out_len = 0;         /* peer gone; the reader notices */
+            }
+            return;
+        }
+        memmove(g.out, g.out + w, g.out_len - (size_t)w);
+        g.out_len -= (size_t)w;
+    }
+}
+
+/* Send one frame. Call with g.lock held, so frames from different threads
+ * cannot interleave or overtake each other. The fd is nonblocking: what it
+ * will not take now is kept, whole frames in order, and goes out ahead of the
+ * next frame or on the panel thread's next pass. A key frame dropped here
+ * used to leave the firmware holding (or never seeing) a key the window
+ * showed down. */
 static void panel_send(const uint8_t *b, size_t n)
 {
-    if (g.fd >= 0 && write(g.fd, b, n) < 0 && errno != EAGAIN) {
-        /* peer gone; the reader notices */
+    if (g.fd < 0) {
+        return;
     }
+    panel_flush();
+    if (!g.out_len) {
+        const ssize_t w = write(g.fd, b, n);
+
+        if (w == (ssize_t)n) {
+            return;
+        }
+        if (w < 0 && errno != EAGAIN && errno != EINTR) {
+            return;                    /* peer gone; the reader notices */
+        }
+        if (w > 0) {
+            b += w;
+            n -= (size_t)w;
+        }
+    }
+    if (g.out_len + n > sizeof g.out) {
+        g.out_lost++;                  /* the guest stopped reading */
+        return;
+    }
+    memcpy(g.out + g.out_len, b, n);
+    g.out_len += n;
 }
 
 void panel_key(int id, bool down)
@@ -276,12 +323,12 @@ void panel_encoder(int enc, int delta)
     }
     if (delta < -128) delta = -128;
     if (delta > 127)  delta = 127;
-    pthread_mutex_lock(&g.lock);
-    g.st.enc_ticks[enc] += delta;
-    pthread_mutex_unlock(&g.lock);
     f[0] = (uint8_t)(0x30 | enc);
     f[1] = (uint8_t)(int8_t)delta;
-    panel_send(f, 2);
+    pthread_mutex_lock(&g.lock);
+    g.st.enc_ticks[enc] += delta;
+    panel_send(f, 2);                  /* under the lock, as panel_key */
+    pthread_mutex_unlock(&g.lock);
 }
 
 void panel_xfader(int pos)
@@ -366,10 +413,15 @@ static void *panel_thread(void *arg)
             struct pollfd p = { g.listen_fd, POLLIN, 0 };
 
             if (poll(&p, 1, 20) > 0) {
-                g.fd = accept(g.listen_fd, NULL, NULL);
-                if (g.fd >= 0) {
-                    fcntl(g.fd, F_SETFL, O_NONBLOCK);
+                const int fd = accept(g.listen_fd, NULL, NULL);
+
+                if (fd >= 0) {
+                    fcntl(fd, F_SETFL, O_NONBLOCK);
                 }
+                pthread_mutex_lock(&g.lock);
+                g.out_len = 0;             /* nothing owed a new peer */
+                g.fd = fd;
+                pthread_mutex_unlock(&g.lock);
             }
             continue;
         }
@@ -389,12 +441,21 @@ static void *panel_thread(void *arg)
             panel_send(f, 2);          /* under the lock, as panel_key */
             pthread_mutex_unlock(&g.lock);
         }
-        struct pollfd p = { g.fd, POLLIN, 0 };
+        /* Anything panel_send had to keep goes out here once the socket
+         * drains, even if no key moves again to push it along. */
+        pthread_mutex_lock(&g.lock);
+        panel_flush();
+        const bool pending = g.out_len != 0;
+        pthread_mutex_unlock(&g.lock);
+        struct pollfd p = { g.fd, (short)(POLLIN | (pending ? POLLOUT : 0)), 0 };
 
         if (poll(&p, 1, 20) > 0) {
             uint8_t buf[4096];
             ssize_t r;
 
+            if (!(p.revents & (POLLIN | POLLHUP | POLLERR))) {
+                continue;                  /* writable only: flushed above */
+            }
             while ((r = read(g.fd, buf, sizeof buf)) > 0) {
                 panel_rx(buf, (size_t)r);
             }
