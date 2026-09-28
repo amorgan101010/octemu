@@ -197,6 +197,21 @@ static struct {
 } g = { .video_fd = -1, .audio_pipe_fd = -1, .sock = -1, .phones = 1.0f,
         .throttled = OT_THROTTLE_DEFAULT };
 
+/* Called with each block of MAIN on the consumer thread (remote.c's stream);
+ * NULL for none. It runs before the phones gain, so the host can be turned
+ * down while a page plays. */
+static AudioTap g_tap;
+static bool g_flowing;                 /* the consumer is taking blocks */
+
+void audio_set_tap(AudioTap tap) { __atomic_store_n(&g_tap, tap, __ATOMIC_RELEASE); }
+
+int audio_stream_rate(void)
+{
+    /* Flat out the blocks come faster than real time and a stream of them
+     * would only overrun; there is nothing to offer then. */
+    return __atomic_load_n(&g_flowing, __ATOMIC_ACQUIRE) && g.throttled ? RATE : 0;
+}
+
 uint64_t audio_blocks(void) { return g.blocks; }
 float audio_phones(void) { return g.phones; }
 void audio_set_phones(float v)
@@ -715,10 +730,10 @@ void audio_set_buffers(unsigned dev_samples, unsigned cushion_ms)
     }
 }
 
-static void monitor_push(const int32_t out[FRAMES][SLOTS])
+/* A block's MAIN as 16-bit stereo: what the monitor, the recordings and the
+ * remote stream all play. */
+static void main_pair(const int32_t out[FRAMES][SLOTS], int16_t st[FRAMES][2])
 {
-    const uint64_t w = g_mon.w;
-
     for (int f = 0; f < FRAMES; f++) {
         /* MAIN = the direct pair (TX 1/2) plus the master pair (TX 3/4).
          * In normal mode 3/4 is silent; with a MASTER track the program
@@ -728,8 +743,18 @@ static void monitor_push(const int32_t out[FRAMES][SLOTS])
         const int32_t l = (out[f][1] >> 8) + (out[f][3] >> 8);
         const int32_t r = (out[f][2] >> 8) + (out[f][4] >> 8);
 
-        g_mon.l[(w + f) % MON_CAP] = (int16_t)(l > 32767 ? 32767 : l < -32768 ? -32768 : l);
-        g_mon.r[(w + f) % MON_CAP] = (int16_t)(r > 32767 ? 32767 : r < -32768 ? -32768 : r);
+        st[f][0] = (int16_t)(l > 32767 ? 32767 : l < -32768 ? -32768 : l);
+        st[f][1] = (int16_t)(r > 32767 ? 32767 : r < -32768 ? -32768 : r);
+    }
+}
+
+static void monitor_push(const int16_t st[FRAMES][2])
+{
+    const uint64_t w = g_mon.w;
+
+    for (int f = 0; f < FRAMES; f++) {
+        g_mon.l[(w + f) % MON_CAP] = st[f][0];
+        g_mon.r[(w + f) % MON_CAP] = st[f][1];
     }
     __atomic_store_n(&g_mon.w, w + FRAMES, __ATOMIC_RELEASE);
 }
@@ -1004,9 +1029,11 @@ static void *audio_main(void *arg)
         free(rgb);
         return NULL;
     }
+    __atomic_store_n(&g_flowing, true, __ATOMIC_RELEASE);
     while (!g_quit) {
         int32_t out[FRAMES][SLOTS], in[FRAMES][INS];
         uint64_t o, h;
+        AudioTap tap;
 
         /* Wait for a block. There is no deadline and no throttle here: the
          * shim paces the guest, and this process simply takes what has been
@@ -1051,16 +1078,11 @@ static void *audio_main(void *arg)
                 }
             }
         }
-        if (g.wav || g.audio_pipe_fd >= 0) {
+        tap = __atomic_load_n(&g_tap, __ATOMIC_ACQUIRE);
+        if (g.wav || g.audio_pipe_fd >= 0 || g.dev || tap) {
             int16_t st[FRAMES][2];      /* MAIN = TX 1/2 + 3/4 (master) */
 
-            for (int f = 0; f < FRAMES; f++) {
-                const int32_t l = (out[f][1] >> 8) + (out[f][3] >> 8);
-                const int32_t r = (out[f][2] >> 8) + (out[f][4] >> 8);
-
-                st[f][0] = (int16_t)(l > 32767 ? 32767 : l < -32768 ? -32768 : l);
-                st[f][1] = (int16_t)(r > 32767 ? 32767 : r < -32768 ? -32768 : r);
-            }
+            main_pair(out, st);
             if (g.wav) {
                 fwrite(st, 1, sizeof st, g.wav);
                 g.wav_frames += FRAMES;
@@ -1068,9 +1090,12 @@ static void *audio_main(void *arg)
             if (g.audio_pipe_fd >= 0) {
                 rec_push(&g_arec, st, sizeof st);
             }
-        }
-        if (g.dev) {
-            monitor_push(out);
+            if (g.dev) {
+                monitor_push(st);
+            }
+            if (tap) {
+                tap(st, FRAMES);
+            }
         }
         /* ☠ A real block has arrived, so the boot thread must stop pacing the
          * video off the wall clock. This lives HERE, not beside the audio
@@ -1085,6 +1110,7 @@ static void *audio_main(void *arg)
         }
     }
 done:
+    __atomic_store_n(&g_flowing, false, __ATOMIC_RELEASE);
     if (g.shm) {
         g.shm->consumer_alive = 0;
     }

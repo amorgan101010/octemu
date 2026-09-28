@@ -21,6 +21,9 @@
  *                   byte g = key 8g+n held), the crossfader (wire value, 255
  *                   = far LEFT), the headphones pot (0-255), then r, g, b for
  *                   each lamp in the 'L' order (0, 0, 0 when dark)
+ *       'A <rate>'  the sample rate of the sound it can stream; 0 while there
+ *                   is none
+ *       binary 'A', then 16-bit LE stereo PCM: MAIN, to a page that asked
  *     The page sends text:
  *       hello              send the layout and state now
  *       b <svg id> <1|0>   press / release a key
@@ -29,6 +32,15 @@
  *                          host's monitor volume, not the Octatrack's)
  *       x <0-255>          move the crossfader (wire value)
  *       r                  let go of everything this page holds
+ *       a <1|0>            stream the sound to this page, or stop
+ *
+ * Sound goes only to pages that ask, and only while the Octatrack runs at real
+ * time (not --unthrottled). It is taken before the headphones knob, so the
+ * host can be turned down while an iPad plays. The page schedules each block
+ * ahead of its own clock (Web Audio's AudioBufferSourceNode: an AudioWorklet
+ * needs HTTPS) and keeps a cushion against Wi-Fi's jitter, ?cushion=<ms> in
+ * the address. A page whose socket is backed up misses blocks rather than
+ * holding up the others.
  *
  * Each page remembers what it holds and lets go of it when its connection
  * ends, and a page that stops answering pings (an iPad put to sleep holds the
@@ -75,6 +87,9 @@
 #define MAX_MESSAGE 4096
 #define MAX_REQUEST 8192
 #define PHONES_STEP 0.05f      /* per detent, as the window's wheel */
+#define SOUND_MS 20            /* send the sound this often */
+#define SOUND_KEEP (RATE / 2 * 4)  /* most sound held (bytes), before the
+                                      oldest goes: 0.5 s */
 
 #define STATE_BYTES (1 + W * H / 8 + 8 + 1 + 1 + PANEL_NLAMPS * 3)
 
@@ -83,9 +98,11 @@ typedef struct {
     pthread_mutex_t send_lock;
     uint64_t held;             /* keys this page holds; its own thread only */
     atomic_bool ws, ready, closed;
+    atomic_bool sound;         /* it asked for the sound */
     _Atomic int64_t heard;
     uint8_t last[STATE_BYTES]; /* publisher only */
     bool has_last;
+    int rate_sent;             /* publisher only; -1 before the first */
     int n;                     /* connection number, for the log */
     char peer[48];
     int64_t born;
@@ -94,10 +111,14 @@ typedef struct {
 static struct {
     int listen_fd, port;
     atomic_bool running;
-    pthread_t accept_thr, pub_thr;
+    pthread_t accept_thr, pub_thr, snd_thr;
     pthread_mutex_t lock;      /* the client list */
     Client *clients[MAX_CLIENTS];
     int nclients;
+    atomic_int listening;      /* pages that asked for the sound */
+    pthread_mutex_t pcm_lock;  /* pcm, pcm_n */
+    uint8_t pcm[SOUND_KEEP];   /* sound not yet sent */
+    size_t pcm_n;
     char layout[4096];
     char url[96];
     FILE *log;                 /* OCTA_REMOTE_LOG=file, or NULL */
@@ -270,6 +291,89 @@ static bool ws_send(Client *c, int opcode, const void *data, size_t n)
     return ok;
 }
 
+/* ---- sound ---------------------------------------------------------------- */
+static void want_sound(Client *c, bool on)
+{
+    on = on && !atomic_load(&c->closed);
+    if (atomic_exchange(&c->sound, on) == on) {
+        return;
+    }
+    if (atomic_fetch_add(&g.listening, on ? 1 : -1) == 1 && !on) {
+        pthread_mutex_lock(&g.pcm_lock);   /* the last one left: none kept */
+        g.pcm_n = 0;
+        pthread_mutex_unlock(&g.pcm_lock);
+    }
+}
+
+/* The audio thread's tap (audio_set_tap): only queues, and does nothing while
+ * no page listens, so the network never holds up the Octatrack. */
+static void feed_sound(const int16_t (*st)[2], int frames)
+{
+    size_t n = (size_t)frames * 4;
+
+    if (!atomic_load(&g.listening)) {
+        return;
+    }
+    pthread_mutex_lock(&g.pcm_lock);
+    if (n > SOUND_KEEP) {
+        st += frames - SOUND_KEEP / 4;
+        n = SOUND_KEEP;
+    }
+    if (g.pcm_n + n > SOUND_KEEP) {        /* a page is not taking it: the
+                                            * oldest goes, whole frames */
+        const size_t over = g.pcm_n + n - SOUND_KEEP;
+
+        memmove(g.pcm, g.pcm + over, g.pcm_n - over);
+        g.pcm_n -= over;
+    }
+    memcpy(g.pcm + g.pcm_n, st, n);
+    g.pcm_n += n;
+    pthread_mutex_unlock(&g.pcm_lock);
+}
+
+/* -> true if `c` can take another block now. A page whose socket is backed up
+ * (Wi-Fi fading, an iPad asleep) misses it: blocking on it would hold the
+ * list lock and stall every page's panel for the send timeout. */
+static bool can_take(const Client *c)
+{
+    struct pollfd p = { c->fd, POLLOUT, 0 };
+
+    return poll(&p, 1, 0) == 1 && (p.revents & POLLOUT);
+}
+
+/* Send the queued sound to every page that asked for it. */
+static void *sound_thread(void *arg)
+{
+    static uint8_t frame[1 + SOUND_KEEP];
+
+    (void)arg;
+    while (atomic_load(&g.running)) {
+        size_t n;
+
+        usleep(SOUND_MS * 1000);
+        pthread_mutex_lock(&g.pcm_lock);
+        n = g.pcm_n;
+        memcpy(frame + 1, g.pcm, n);
+        g.pcm_n = 0;
+        pthread_mutex_unlock(&g.pcm_lock);
+        if (!n) {
+            continue;
+        }
+        frame[0] = 'A';
+        pthread_mutex_lock(&g.lock);
+        for (int i = 0; i < g.nclients; i++) {
+            Client *c = g.clients[i];
+
+            if (atomic_load(&c->sound) && !atomic_load(&c->closed) &&
+                can_take(c)) {
+                ws_send(c, 0x2, frame, 1 + n);
+            }
+        }
+        pthread_mutex_unlock(&g.lock);
+    }
+    return NULL;
+}
+
 /* ---- input ---------------------------------------------------------------- */
 static void hold(Client *c, int id, bool down)
 {
@@ -304,6 +408,8 @@ static void handle(Client *c, char *text)
         atomic_store(&c->ready, false);    /* the publisher resends it all */
     } else if (!strcmp(verb, "r")) {
         let_go(c);
+    } else if (!strcmp(verb, "a") && n == 2) {
+        want_sound(c, !strcmp(name, "1"));
     } else if (!strcmp(verb, "b") && n == 3) {
         const int id = panel_svg_key(name);
 
@@ -599,6 +705,7 @@ static void *client_thread(void *arg)
     rlog(c, "done after %lld ms", (long long)(now_ms() - c->born));
     atomic_store(&c->closed, true);
     let_go(c);                         /* never leave a key stuck down */
+    want_sound(c, false);
     pthread_mutex_lock(&g.lock);
     for (int i = 0; i < g.nclients; i++) {
         if (g.clients[i] == c) {
@@ -648,6 +755,7 @@ static void *accept_thread(void *arg)
             continue;
         }
         c->fd = fd;
+        c->rate_sent = -1;
         c->n = ++g.seq;
         c->born = now_ms();
         inet_ntop(AF_INET, &pa.sin_addr, c->peer, sizeof c->peer);
@@ -710,6 +818,7 @@ static void *publish_thread(void *arg)
     while (atomic_load(&g.running)) {
         const int64_t now = now_ms();
         const bool ping = now - last_ping >= PING_MS;
+        const int rate = audio_stream_rate();
         size_t n = 0;
 
         usleep(FRAME_MS * 1000);
@@ -739,6 +848,15 @@ static void *publish_thread(void *arg)
                 }
                 c->has_last = false;
                 atomic_store(&c->ready, true);
+            }
+            if (rate != c->rate_sent) {
+                char text[16];
+
+                snprintf(text, sizeof text, "A %d", rate);
+                if (!ws_send(c, 0x1, text, strlen(text))) {
+                    continue;
+                }
+                c->rate_sent = rate;
             }
             if (!n) {
                 n = state_frame(st);
@@ -811,6 +929,7 @@ bool remote_start(int first_port)
     int port;
 
     pthread_mutex_init(&g.lock, NULL);
+    pthread_mutex_init(&g.pcm_lock, NULL);
     build_layout();
     g.t0 = now_ms();
     if (getenv("OCTA_REMOTE_LOG") && *getenv("OCTA_REMOTE_LOG")) {
@@ -858,6 +977,15 @@ bool remote_start(int first_port)
         g.listen_fd = -1;
         return false;
     }
+    if (pthread_create(&g.snd_thr, NULL, sound_thread, NULL)) {
+        atomic_store(&g.running, false);
+        pthread_join(g.accept_thr, NULL);
+        pthread_join(g.pub_thr, NULL);
+        close(g.listen_fd);
+        g.listen_fd = -1;
+        return false;
+    }
+    audio_set_tap(feed_sound);         /* last: every failure above is tapless */
     lan_address(addr, sizeof addr);
     snprintf(g.url, sizeof g.url, "http://%s:%d/", addr, g.port);
     fprintf(stderr, "octemu: remote panel at %s\n", g.url);
@@ -874,8 +1002,10 @@ void remote_stop(void)
     if (!atomic_exchange(&g.running, false)) {
         return;
     }
+    audio_set_tap(NULL);
     pthread_join(g.accept_thr, NULL);
     pthread_join(g.pub_thr, NULL);
+    pthread_join(g.snd_thr, NULL);
     close(g.listen_fd);
     g.listen_fd = -1;
     pthread_mutex_lock(&g.lock);

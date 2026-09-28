@@ -38,8 +38,12 @@ at http://…:8798/`). Open it on a tablet to play the panel with your fingers:
 keys stay held while touched, so chords and parameter locks work (hold a trig,
 turn a knob). Drag a knob to turn it, tap it to click, or hold it still and
 then drag to push-turn. The screen, lamps and crossfader follow the emulator
-live. There is no password, so use it on a network you trust. `--no-remote`
-turns it off, `--remote-port N` moves it, and `--remote` turns it on for
+live. The sound button at the bottom left streams the emulator's output to the
+tablet too; the headphones knob sets only the host's volume, so the PC can be
+turned down while the tablet plays (`?cushion=<ms>` in the address trades
+latency for Wi-Fi dropouts, default 150). There is no password, so use it on
+a network you trust. `--no-remote` turns it off, `--remote-port N` moves it,
+and `--remote` turns it on for
 `--headless` and `--script` runs, which leave it off by default.
 `python3 tests/remote-panel.py` tests it end to end.
 

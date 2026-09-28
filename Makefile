@@ -208,8 +208,9 @@ test-emu: octemu $(QEMU) $(IMG)
 	    --script tests/walks/boot-nocard.jsonl --timeout 90
 
 # The remote panel (src/remote.c) from a stand-in browser: page and assets
-# served, handshake, layout, state, and that a page which leaves or goes
-# silent lets go of the keys it held.
+# served, handshake, layout, state, that a page which leaves or goes silent
+# lets go of the keys it held, and the sound stream (offered, real-time pace,
+# stopped, and never sent to a page that did not ask).
 test-remote-panel: octemu $(QEMU) $(IMG)
 	@echo "== test-remote-panel: expect ~25 s =="
 	python3 tests/remote-panel.py

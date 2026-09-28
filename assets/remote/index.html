@@ -11,6 +11,11 @@
   moment and it pushes, and a drag from there is a push-turn. The crossfader
   handle drags. The headphones knob is the monitor volume on the host.
 
+  Sound: the button at the bottom left streams the emulator's MAIN output to
+  this page (once octemu offers it: while it runs at real time). It is taken
+  before the headphones knob, so the host can be turned down while the page
+  plays. ?cushion=<ms> in the address sets how far ahead it plays (150).
+
   SPDX-License-Identifier: MIT
 -->
 <html lang="en">
@@ -55,12 +60,20 @@ html, body {
   color: #8a8c8e; font-size: 12px; padding: 4px 6px;
 }
 #status.bad { color: #ffd23e; }
+#sound {
+  position: fixed; left: 10px; bottom: calc(6px + env(safe-area-inset-bottom));
+  font: inherit; font-size: 12px; color: #8a8c8e; background: #232426;
+  border: 1px solid #3c3e41; border-radius: 6px; padding: 4px 10px;
+}
+#sound.on { color: #ffd23e; border-color: #ffd23e; }
+#sound[hidden] { display: none; }
 </style>
 </head>
 <body>
 <div id="panel"></div>
 <canvas id="oled" width="128" height="64"></canvas>
 <div id="status">loading</div>
+<button id="sound" hidden>sound off</button>
 <script>
 'use strict';
 const PLATE = '34 35 1177 611';        // the face plate, without the chassis
@@ -182,18 +195,23 @@ async function connect() {
   ws.onopen = () => {
     note('websocket open ' + Math.round(performance.now() - asked) + 'ms after new WebSocket');
     retry = 500; say('connected'); send('hello');
+    if (soundOn) send('a 1');
   };
   ws.onclose = (ev) => {
     note('websocket closed code=' + ev.code + ' clean=' + ev.wasClean + ' ' +
          Math.round(performance.now() - asked) + 'ms after new WebSocket');
     letGoAll(false);
+    soundRate(0);
     retryLater('reconnecting');
   };
   ws.onmessage = (ev) => {
     if (typeof ev.data === 'string') {
       if (ev.data.startsWith('L ')) { layout = JSON.parse(ev.data.slice(2)); bind(); }
+      else if (ev.data.startsWith('A ')) soundRate(+ev.data.slice(2));
     } else {
-      state(new Uint8Array(ev.data));
+      const b = new Uint8Array(ev.data);
+      if (b[0] === 0x41) sound(ev.data);
+      else state(b);
     }
   };
 }
@@ -330,6 +348,87 @@ function letGoAll(tell) {
   for (const id of [...pointers.keys()]) up({pointerId: id, type: 'pointercancel'});
   if (tell) send('r');
 }
+
+/* ---- sound: MAIN, streamed while the page asks for it ------------------- */
+/* Each block is scheduled on the page's own clock, `playAt` running on by
+ * exact block lengths; it restarts a cushion ahead after running dry, and a
+ * block that would put it more than SLACK past the cushion is dropped (Wi-Fi
+ * delivers in bursts, and the two clocks drift apart). */
+const soundBtn = document.getElementById('sound');
+const CUSHION = (+new URLSearchParams(location.search).get('cushion') || 150) / 1000;
+const SLACK = 0.1;
+let actx = null, rate = 0, soundOn = false, playAt = 0, dropouts = 0;
+
+function soundRate(r) {
+  rate = r;
+  soundBtn.hidden = !r;
+  if (actx && r && actx.sampleRate !== r && actx._wanted !== r) { actx.close(); actx = null; }
+  showSound();
+}
+
+function showSound() {
+  const live = actx && actx.state === 'running';
+  soundBtn.className = soundOn ? 'on' : '';
+  soundBtn.textContent = !soundOn ? 'sound off' : !live ? 'tap for sound'
+    : dropouts ? 'sound on - ' + dropouts + ' dropouts' : 'sound on';
+}
+
+function context() {
+  // At the stream's rate, so the blocks join without resampling seams.
+  try { actx = new AudioContext({sampleRate: rate}); }
+  catch (e) { actx = new (window.AudioContext || window.webkitAudioContext)(); }
+  actx._wanted = rate;
+  actx.onstatechange = showSound;
+}
+
+// A click, not pointerdown: iOS lets a page start sound only from one.
+soundBtn.addEventListener('click', () => {
+  if (!rate) return;
+  if (navigator.audioSession) {
+    try { navigator.audioSession.type = 'playback'; } catch (e) {}  // past the mute switch
+  }
+  if (!actx) context();
+  if (soundOn && actx.state === 'running') {
+    soundOn = false;
+    send('a 0');
+  } else {
+    soundOn = true;
+    actx.resume();
+    const tick = actx.createBufferSource();   // older iOS unlocks on a played buffer
+    tick.buffer = actx.createBuffer(1, 1, actx.sampleRate);
+    tick.connect(actx.destination);
+    tick.start();
+    playAt = 0;
+    send('a 1');
+  }
+  showSound();
+});
+
+function sound(data) {
+  if (!soundOn || !actx || actx.state !== 'running' || !rate) return;
+  const pcm = new Int16Array(data.slice(1, 1 + ((data.byteLength - 1) & ~3)));
+  const n = pcm.length >> 1;
+  if (!n) return;
+  const now = actx.currentTime;
+  if (playAt < now + 0.005) {
+    if (playAt) { dropouts++; showSound(); }
+    playAt = now + CUSHION;
+  } else if (playAt - now > CUSHION + SLACK) {
+    return;
+  }
+  const buf = actx.createBuffer(2, n, rate);
+  const l = buf.getChannelData(0), r = buf.getChannelData(1);
+  for (let i = 0, j = 0; i < n; i++, j += 2) { l[i] = pcm[j] / 32768; r[i] = pcm[j + 1] / 32768; }
+  const src = actx.createBufferSource();
+  src.buffer = buf;
+  src.connect(actx.destination);
+  src.start(playAt);
+  playAt += n / rate;
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && soundOn && actx) { playAt = 0; actx.resume().then(showSound, showSound); }
+});
 
 addEventListener('pointermove', move);
 addEventListener('pointerup', up);

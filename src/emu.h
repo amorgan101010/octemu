@@ -121,6 +121,13 @@ float audio_phones(void);
 void audio_set_phones(float v);
 /* Live monitor buffering; 0 keeps the default. Call before audio_start. */
 void audio_set_buffers(unsigned dev_samples, unsigned cushion_ms);
+/* Each block of MAIN (16-bit stereo, before the phones gain) goes to `tap` on
+ * the audio thread, which must not be held up; NULL stops it. */
+typedef void (*AudioTap)(const int16_t (*st)[2], int frames);
+void audio_set_tap(AudioTap tap);
+/* The rate of the sound a tap can stream live: RATE while blocks come at real
+ * time, 0 while there are none or they come flat out (--unthrottled). */
+int audio_stream_rate(void);
 
 /* The host-specific calls — app activation, the USB DISK MODE host mount and
  * the --midi bridge — are in src/platform/platform.h, one file per platform. */

@@ -11,6 +11,9 @@ Boots octemu headless with --remote, then over plain sockets:
   - a crossfader move comes back in the state
   - a page that goes silent with its socket open (an iPad put to sleep) is
     dropped, and lets go of its keys
+  - 'A 44100' offers the sound; after 'a 1' binary 'A' frames of whole
+    16-bit stereo frames come at about real time, and after 'a 0' they stop.
+    The other pages never get one (their state frames are length-checked).
 
 Run from the repo root: python3 tests/remote-panel.py [--port N]
 """
@@ -125,6 +128,58 @@ def key_held(state, n):
     return (state[1025 + (n >> 3)] >> (n & 7)) & 1
 
 
+def sound_stream(port):
+    """The sound: offered, streamed at about real time, and stopped."""
+    page = Page(port)
+    rate = None
+    end = time.time() + 10
+    while rate is None and time.time() < end:
+        op, p = page.recv()
+        if op == 0x1 and p.startswith(b'A '):
+            rate = int(p[2:])
+        elif op == 0x2 and p[:1] == b'A':
+            fail('sound sent to a page that did not ask')
+    if rate != 44100:
+        fail('the sound is offered at %r, want 44100' % rate)
+    print('ok: sound offered at %d Hz' % rate)
+
+    page.send('a 1')
+    got, first, last = 0, None, None
+    end = time.time() + 5
+    while time.time() < end:
+        op, p = page.recv()
+        if op != 0x2 or p[:1] != b'A':
+            continue
+        if (len(p) - 1) % 4:
+            fail('a sound frame of %d bytes is not whole stereo frames' % (len(p) - 1))
+        now = time.time()
+        if first is None:
+            first = now                    # count from the first: it ends a gap
+        else:
+            got += len(p) - 1
+            last = now
+    if first is None or last is None or last - first < 3:
+        fail('no sound came after a 1')
+    ratio = got / 4 / rate / (last - first)
+    # A cardless boot may run a little under real time; never much over it.
+    if not 0.5 < ratio < 1.15:
+        fail('sound came at %.2fx real time' % ratio)
+    print('ok: sound streamed at %.3fx real time' % ratio)
+
+    page.send('a 0')
+    t = time.time()
+    page.s.settimeout(0.5)
+    while time.time() - t < 3:
+        try:
+            op, p = page.recv()
+        except socket.timeout:
+            continue
+        if op == 0x2 and p[:1] == b'A' and time.time() - t > 0.5:
+            fail("sound still coming %.1f s after 'a 0'" % (time.time() - t))
+    print("ok: 'a 0' stops the sound")
+    page.close()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--port', type=int, default=18798)
@@ -132,7 +187,7 @@ def main():
     env = dict(os.environ, SDL_AUDIODRIVER='dummy')
     emu = subprocess.Popen(['./octemu', '--headless', '--cf-card', 'none',
                             '--nvram', 'none', '--remote', '--remote-port',
-                            str(args.port), '--timeout', '60'],
+                            str(args.port), '--timeout', '90'],
                            stderr=subprocess.PIPE, text=True, env=env)
     try:
         port = None
@@ -211,6 +266,8 @@ def main():
         print('ok: a page that stops answering is dropped and lets go')
         sleeper.close()
         page.close()
+
+        sound_stream(port)
     finally:
         emu.terminate()
         try:
