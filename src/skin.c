@@ -1057,6 +1057,10 @@ static bool control_centre(const char *name, float *cx, float *cy)
     return true;
 }
 
+/* A walk's click step waits on this: a click while the last one is still
+ * down would be dropped (see skin_script_click). */
+bool skin_script_busy(void) { return g_ui.click_up_ms != 0; }
+
 bool skin_script_click(const char *name)
 {
     SDL_Event e = {0};
@@ -1066,7 +1070,7 @@ bool skin_script_click(const char *name)
         return false;                      /* no such control: a script error */
     }
     if (g_ui.click_up_ms) {
-        return true;                       /* previous click still down */
+        return true;       /* still down: script.c waits on skin_script_busy */
     }
     /* Real SDL events at inverse-mapped window coords, so this exercises the
      * view transform as well as the hit geometry. */

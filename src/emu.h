@@ -156,6 +156,7 @@ void skin_tick(void);                        /* deferred switch/click release */
  * key id — and the click round-trips through synthetic SDL events at
  * inverse-mapped window coords, which exercises the view transform too. */
 bool skin_script_click(const char *name);
+bool skin_script_busy(void);
 bool skin_script_drag(const char *name, long detents, bool push);
 
 /* ---- script.c: the JSONL walk --------------------------------------------- */

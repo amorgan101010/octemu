@@ -439,6 +439,12 @@ static bool act(void)
 {
     const Step *s = &S.s;
 
+    /* A click while the previous one is still down would be lost, and used to
+     * pass anyway: two click steps in a row are one pass apart and the release
+     * is 150 ms out. Stay on this step until it has gone up. */
+    if (s->action == A_CLICK && skin_ok() && skin_script_busy()) {
+        return true;
+    }
     /* Before the gesture, not after: a slide asked for on this step leaves at
      * the same instant the key goes down. */
     if (s->xfade) {
